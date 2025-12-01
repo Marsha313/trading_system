@@ -1,0 +1,59 @@
+# 账户配置示例
+
+# 全局交易配置（两个账户共享）
+trading:
+  # Aster代币配置
+  aster_asset: "ASTER"
+  aster_symbol: "ASTERUSDT"
+  min_aster_balance: 10
+  aster_buy_quantity: 5
+  aster_order_timeout: 10
+  
+  # 交易参数
+  check_interval: 1
+  max_retry: 3
+  order_timeout: 10
+  trading_strategy: "BOTH"
+  
+  # 交易对配置
+  trading_pairs: ["ATUSDT", "BTTCUSDT"]
+  
+  # 交易对特定设置
+  pair_settings:
+    ATUSDT:
+      trade_quantity: 10
+      target_volume: 1000
+      max_spread: 0.002
+      max_price_change: 0.005
+      min_depth_multiplier: 2
+      min_price_increment: 0.0001
+      min_5min_volume: 0.0
+      min_market_score: 0.7
+      strategy: "BOTH"
+    
+    BTTCUSDT:
+      trade_quantity: 1000
+      target_volume: 5000
+      max_spread: 0.001
+      max_price_change: 0.003
+      min_depth_multiplier: 3
+      min_price_increment: 0.000001
+      min_5min_volume: 10000.0
+      min_market_score: 0.8
+      strategy: "LIMIT_MARKET"
+
+# 账户配置（只包含API密钥）
+accounts:
+  # 账户配置1
+  account1:
+    account1_api_key: "your_account1_api_key_here"
+    account1_secret_key: "your_account1_secret_key_here"
+    account2_api_key: "your_account2_api_key_here"
+    account2_secret_key: "your_account2_secret_key_here"
+
+  # 账户配置2
+  account2:
+    account1_api_key: "your_other_account1_api_key_here"
+    account1_secret_key: "your_other_account1_secret_key_here"
+    account2_api_key: "your_other_account2_api_key_here"
+    account2_secret_key: "your_other_account2_secret_key_here"

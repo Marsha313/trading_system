@@ -1,0 +1,18 @@
+accounts:
+  - name: "主账户"
+    api_key: "your_api_key_1"
+    secret_key: "your_secret_key_1"
+    enabled: true
+  - name: "子账户1"
+    api_key: "your_api_key_2"
+    secret_key: "your_secret_key_2"
+    enabled: true
+
+settings:
+  default_period_days: 7      # 默认统计天数
+  max_trades_limit: 500       # 最大交易记录数
+  show_account_balance: true  # 显示账户余额
+  compare_performance: true   # 对比账户表现
+  daily_volume_only: false    # 是否仅统计当天
+  daily_volume_timezone: UTC  # 时区设置
+  minutes_interval: null      # 分钟间隔（null=禁用，30=30分钟等）
