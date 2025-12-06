@@ -429,7 +429,7 @@ class AsterDexMultiAccountSpotAnalytics:
             'total_commission': total_commission,
             'realized_pnl': realized_pnl,
             'efficiency_ratio': efficiency,
-            'cost_pnl_total': realized_pnl + total_commission
+            'cost_pnl_total': realized_pnl - total_commission
         }
 
         return stats
@@ -824,8 +824,8 @@ def display_multi_account_report(report: Dict):
         win_rate = pnl['win_rate']
         efficiency = efficiency_data['efficiency_ratio']
 
-        print(f"{account_name:<14} {volume['total_turnover']:>11,.0f} {commission['total_commission']:>12,.0f} "
-              f"{pnl['realized_pnl']:>12,.1f} {net_profit:>12,.1f} {volume['total_trades']:>12} "
+        print(f"{account_name:<14} {volume['total_turnover']:>11,.0f} {commission['total_commission']:>12,.3f} "
+              f"{pnl['realized_pnl']:>12,.3f} {net_profit:>12,.3f} {volume['total_trades']:>12} "
               f"{position['active_positions_count']:>10} {position['total_position_value']:>15,.0f} "
               f"{orders['total_orders']:>10} "
               f"{win_rate:>12.1%} {efficiency:>12.4f}")
