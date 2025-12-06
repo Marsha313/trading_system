@@ -301,7 +301,11 @@ class AsterDexMultiAccountSpotAnalytics:
             
             # 计算总余额和持仓（只统计指定交易对）
             balance_analysis = self._analyze_account_balance(account_info, symbols_filter)
+            
+            # 更新：USDT不计入总持仓，只用于单独显示
             total_balance = balance_analysis['total_balance_usdt']
+            usdt_balance = balance_analysis.get('usdt_balance', 0.0)
+            aster_balance = balance_analysis.get('aster_balance', 0.0)
 
             # 3. 获取当前委托订单
             open_orders = self.get_open_orders(account)
@@ -310,6 +314,8 @@ class AsterDexMultiAccountSpotAnalytics:
             # 分析交易表现
             analytics = self._analyze_trading_performance(trades, balance_analysis, open_orders, start_time, end_time)
             analytics['account_balance'] = total_balance
+            analytics['usdt_balance'] = usdt_balance
+            analytics['aster_balance'] = aster_balance
             analytics['account_name'] = account.name
 
             return analytics
@@ -321,7 +327,7 @@ class AsterDexMultiAccountSpotAnalytics:
             return {}
 
     def _analyze_account_balance(self, account_info: Dict, symbols_filter: List[str] = None) -> Dict:
-        """分析账户余额和持仓，只统计指定交易对的持仓"""
+        """分析账户余额和持仓，只统计指定交易对的持仓，USDT和ASTER单独统计"""
         balances = account_info.get('balances', [])
         
         # 获取所有交易对的最新价格
@@ -335,7 +341,9 @@ class AsterDexMultiAccountSpotAnalytics:
             price_dict = {}
 
         total_balance_usdt = 0.0
-        filtered_balance_usdt = 0.0  # 只统计指定交易对的余额
+        filtered_balance_usdt = 0.0  # 只统计指定交易对的余额（不包括USDT）
+        usdt_balance = 0.0  # USDT余额（单独统计）
+        aster_balance = 0.0  # ASTER余额（单独统计）
         positions = []
         filtered_positions = []
         active_positions_count = 0
@@ -356,21 +364,43 @@ class AsterDexMultiAccountSpotAnalytics:
                 # 计算USDT价值
                 usdt_value = 0.0
                 
+                # 特殊处理USDT
                 if asset == 'USDT':
                     usdt_value = total
-                    # USDT始终计入总余额
+                    usdt_balance = usdt_value  # 记录USDT余额
+                    # USDT不计入总持仓，只单独显示
+                    
+                    # USDT始终计入总余额（但不算作持仓）
                     total_balance_usdt += usdt_value
                     
-                    # 如果指定交易对中包含USDT交易对，则计入过滤后的余额
-                    if any('USDT' in symbol for symbol in symbols_filter):
+                    # USDT不计入过滤后的持仓
+                    # 注意：这里USDT不计入filtered_balance_usdt
+                    
+                # 特殊处理ASTER
+                elif asset == 'ASTER':
+                    # 查找ASTER/USDT价格
+                    symbol = f"ASTERUSDT"
+                    if symbol in price_dict:
+                        usdt_value = total * price_dict[symbol]
+                        aster_balance = usdt_value  # 记录ASTER余额（USDT价值）
+                    else:
+                        # 如果没有ASTERUSDT交易对，尝试其他方式
+                        usdt_value = 0
+                    
+                    # ASTER不计入指定交易对持仓（除非在symbols_filter中）
+                    total_balance_usdt += usdt_value
+                    
+                    # 如果ASTER在symbols_filter中，则计入
+                    if symbol in symbols_filter:
                         filtered_balance_usdt += usdt_value
-                        
                         position_data = {
                             'asset': asset,
                             'total_amount': total,
                             'free_amount': free,
                             'locked_amount': locked,
-                            'usdt_value': usdt_value
+                            'usdt_value': usdt_value,
+                            'symbol': symbol,
+                            'price': price_dict.get(symbol, 0)
                         }
                         filtered_positions.append(position_data)
                         filtered_active_positions_count += 1
@@ -405,8 +435,9 @@ class AsterDexMultiAccountSpotAnalytics:
                             usdt_value = total / price_dict[symbol_reverse]
                             total_balance_usdt += usdt_value
                 
-                # 记录所有持仓信息（用于显示所有持仓）
-                if usdt_value > 1:  # 只记录价值超过1 USDT的持仓
+                # 记录所有持仓信息（用于显示所有持仓，不包括USDT）
+                # USDT不计入持仓，只单独显示
+                if asset != 'USDT' and usdt_value > 1:  # 只记录价值超过1 USDT的持仓
                     position_data = {
                         'asset': asset,
                         'total_amount': total,
@@ -423,14 +454,16 @@ class AsterDexMultiAccountSpotAnalytics:
 
         return {
             'total_balance_usdt': total_balance_usdt,
-            'filtered_balance_usdt': filtered_balance_usdt,  # 新增：过滤后的余额
+            'filtered_balance_usdt': filtered_balance_usdt,  # 过滤后的余额（不包括USDT）
             'active_positions_count': active_positions_count,
-            'filtered_active_positions_count': filtered_active_positions_count,  # 新增：过滤后的持仓数
-            'total_position_value': total_balance_usdt,
-            'filtered_position_value': filtered_balance_usdt,  # 新增：过滤后的持仓价值
+            'filtered_active_positions_count': filtered_active_positions_count,  # 过滤后的持仓数（不包括USDT）
+            'total_position_value': filtered_balance_usdt,  # 修改：总持仓价值只包含过滤后的持仓（不包括USDT）
+            'filtered_position_value': filtered_balance_usdt,  # 过滤后的持仓价值
+            'usdt_balance': usdt_balance,  # 新增：USDT余额
+            'aster_balance': aster_balance,  # 新增：ASTER余额
             'positions': positions,
-            'filtered_positions': filtered_positions,  # 新增：过滤后的持仓列表
-            'symbols_filter': symbols_filter,  # 新增：使用的交易对过滤器
+            'filtered_positions': filtered_positions,  # 过滤后的持仓列表
+            'symbols_filter': symbols_filter,  # 使用的交易对过滤器
             'balances': balances
         }
 
@@ -735,6 +768,7 @@ class AsterDexMultiAccountSpotAnalytics:
             
         if symbols_filter:
             print(f"📊 只统计指定交易对的持仓: {', '.join(symbols_filter)}")
+        print("💰 USDT不计入总持仓，USDT和ASTER单独统计显示")
 
         all_accounts_data = {}
         total_stats = {
@@ -746,9 +780,11 @@ class AsterDexMultiAccountSpotAnalytics:
             'total_open_orders': 0,
             'total_order_value': 0.0,
             'total_active_positions': 0,
-            'filtered_active_positions': 0,  # 新增：过滤后的持仓数
+            'filtered_active_positions': 0,  # 过滤后的持仓数（不包括USDT）
             'total_position_value': 0.0,
-            'filtered_position_value': 0.0,  # 新增：过滤后的持仓价值
+            'filtered_position_value': 0.0,  # 过滤后的持仓价值（不包括USDT）
+            'total_usdt_balance': 0.0,  # 新增：总USDT余额
+            'total_aster_balance': 0.0,  # 新增：总ASTER余额
             'total_efficiency': 0.0
         }
 
@@ -771,6 +807,8 @@ class AsterDexMultiAccountSpotAnalytics:
                 total_stats['filtered_active_positions'] += account_data['position_analysis']['filtered_active_positions_count']
                 total_stats['total_position_value'] += account_data['position_analysis']['total_position_value']
                 total_stats['filtered_position_value'] += account_data['position_analysis']['filtered_position_value']
+                total_stats['total_usdt_balance'] += account_data.get('usdt_balance', 0.0)  # 累计USDT余额
+                total_stats['total_aster_balance'] += account_data.get('aster_balance', 0.0)  # 累计ASTER余额
                 total_stats['total_efficiency'] += account_data['efficiency_analysis']['efficiency_ratio']
 
         # 计算平均效率
@@ -843,15 +881,22 @@ def display_multi_account_report(report: Dict):
         print(f"⏰ 统计模式: 最近{minutes_interval}分钟交易数据")
     elif daily_volume_only:
         print(f"📅 统计模式: 仅统计当天交易量 (UTC时间)")
+    
+    print("💰 USDT不计入总持仓，USDT和ASTER单独统计显示")
 
     accounts_data = report['accounts_data']
 
     # 各账户详细分析
     if config_used.get('show_account_balance', True):
-        print(f"\n💰 各账户余额:")
+        print(f"\n💰 各账户余额和特殊资产:")
         for account_name, data in accounts_data.items():
             balance = data.get('account_balance', 0)
-            print(f"  {account_name}: {balance:,.2f} USDT")
+            usdt_balance = data.get('usdt_balance', 0)
+            aster_balance = data.get('aster_balance', 0)
+            print(f"  {account_name}:")
+            print(f"    总余额: {balance:,.2f} USDT")
+            print(f"    USDT余额: {usdt_balance:,.2f} USDT")
+            print(f"    ASTER余额: {aster_balance:,.2f} USDT")
 
     # 显示每个账户的详细报告
     print(f"\n🔍 各账户详细分析:")
@@ -874,26 +919,23 @@ def display_multi_account_report(report: Dict):
     else:
         print(f"总持仓数量: {total_stats['total_active_positions']} 个")
         print(f"总持仓价值: {total_stats['total_position_value']:,.2f} USDT")
+    print(f"总USDT余额: {total_stats['total_usdt_balance']:,.2f} USDT")
+    print(f"总ASTER余额: {total_stats['total_aster_balance']:,.2f} USDT")
     print(f"平均效率比率: {total_stats.get('avg_efficiency', 0):.4f}")
 
     # 各账户详细统计
     print(f"\n📈 各账户表现对比:")
     if symbols_filter:
-        print(f"（持仓统计仅包含指定交易对: {', '.join(symbols_filter)}）")
+        print(f"（持仓统计仅包含指定交易对，USDT不计入持仓）")
     
     # 动态调整表头宽度
-    if symbols_filter:
-        header_format = "{:<15} {:<12} {:<8} {:<9} {:<8} {:<9} {:<8} {:<12} {:<8} {:<9} {:<10}"
-        print("-" * 140)
-        print(header_format.format(
-            '账户名称', '交易额', '手续费', '盈亏', '净收益', '交易次数', 
-            '指定持仓', '持仓价值', '委托数', '胜率', '效率'
-        ))
-        print("-" * 140)
-    else:
-        print("-" * 160)
-        print(f"{'账户名称':<15} {'交易额':<12} {'手续费':<8} {'盈亏':<9} {'净收益':<8} {'交易次数':<9} {'持仓数':<8} {'持仓价值':<12} {'委托数':<8} {'胜率':<9} {'效率':<10}")
-        print("-" * 160)
+    header_format = "{:<15} {:<12} {:<8} {:<9} {:<8} {:<9} {:<8} {:<12} {:<8} {:<8} {:<8} {:<8} {:<10}"
+    print("-" * 150)
+    print(header_format.format(
+        '账户名称', '交易额', '手续费', '盈亏', '净收益', '交易次数', 
+        '持仓数', '持仓价值', 'USDT', 'ASTER', '委托数', '胜率', '效率'
+    ))
+    print("-" * 150)
 
     for account_name, data in accounts_data.items():
         volume = data['volume_analysis']
@@ -906,32 +948,27 @@ def display_multi_account_report(report: Dict):
         net_profit = pnl['realized_pnl'] - commission['total_commission']
         win_rate = pnl['win_rate']
         efficiency = efficiency_data['efficiency_ratio']
-
+        
+        # 获取特殊资产余额
+        usdt_balance = data.get('usdt_balance', 0.0)
+        aster_balance = data.get('aster_balance', 0.0)
+        
+        # 显示过滤后的持仓数据
         if symbols_filter:
-            # 显示过滤后的持仓数据
             active_positions = position['filtered_active_positions_count']
             position_value = position['filtered_position_value']
-            
-            print(f"{account_name:<14} {volume['total_turnover']:>11,.0f} {commission['total_commission']:>12,.3f} "
-                  f"{pnl['realized_pnl']:>12,.3f} {net_profit:>12,.3f} {volume['total_trades']:>12} "
-                  f"{active_positions:>10} {position_value:>15,.0f} "
-                  f"{orders['total_orders']:>10} "
-                  f"{win_rate:>12.1%} {efficiency:>12.4f}")
         else:
-            # 显示所有持仓数据
             active_positions = position['active_positions_count']
             position_value = position['total_position_value']
-            
-            print(f"{account_name:<14} {volume['total_turnover']:>11,.0f} {commission['total_commission']:>12,.3f} "
-                  f"{pnl['realized_pnl']:>12,.3f} {net_profit:>12,.3f} {volume['total_trades']:>12} "
-                  f"{active_positions:>10} {position_value:>15,.0f} "
-                  f"{orders['total_orders']:>10} "
-                  f"{win_rate:>12.1%} {efficiency:>12.4f}")
+        
+        print(f"{account_name:<14} {volume['total_turnover']:>11,.0f} {commission['total_commission']:>12,.3f} "
+              f"{pnl['realized_pnl']:>12,.3f} {net_profit:>12,.3f} {volume['total_trades']:>12} "
+              f"{active_positions:>10} {position_value:>15,.0f} "
+              f"{usdt_balance:>12,.0f} {aster_balance:>12,.0f} "
+              f"{orders['total_orders']:>10} "
+              f"{win_rate:>12.1%} {efficiency:>12.4f}")
 
-    if symbols_filter:
-        print("-" * 140)
-    else:
-        print("-" * 160)
+    print("-" * 150)
 
 def display_single_account_details_spot(account_name: str, data: Dict, minutes_interval: int = None, 
                                        daily_volume_only: bool = False, symbols_filter: List[str] = None):
@@ -950,6 +987,13 @@ def display_single_account_details_spot(account_name: str, data: Dict, minutes_i
     else:
         print(f"\n  📋 账户: {account_name}")
 
+    # 显示特殊资产余额
+    usdt_balance = data.get('usdt_balance', 0.0)
+    aster_balance = data.get('aster_balance', 0.0)
+    print(f"    总余额: {data.get('account_balance', 0):,.2f} USDT")
+    print(f"    USDT余额: {usdt_balance:,.2f} USDT")
+    print(f"    ASTER余额: {aster_balance:,.2f} USDT")
+
     print(f"    交易额: {volume['total_turnover']:,.2f} USDT")
     print(f"    买入量: {volume['buy_volume']:,.4f}")
     print(f"    卖出量: {volume['sell_volume']:,.4f}")
@@ -957,7 +1001,7 @@ def display_single_account_details_spot(account_name: str, data: Dict, minutes_i
     print(f"    交易次数: {volume['total_trades']:,} 次")
     print(f"    交易币对: {volume['symbols_traded_count']} 个")
 
-    # 显示持仓信息
+    # 显示持仓信息（USDT不计入持仓）
     if symbols_filter:
         print(f"    指定交易对持仓: {position['filtered_active_positions_count']} 个币种")
         print(f"    指定交易对持仓价值: {position['filtered_position_value']:,.2f} USDT")
@@ -971,15 +1015,15 @@ def display_single_account_details_spot(account_name: str, data: Dict, minutes_i
         else:
             print(f"    指定交易对持仓: 无")
             
-        # 显示所有持仓数量（作为参考）
-        print(f"    所有持仓: {position['active_positions_count']} 个币种 (总价值: {position['total_position_value']:,.2f} USDT)")
+        # 显示所有持仓数量（不包括USDT）
+        print(f"    所有持仓（不包括USDT）: {position['active_positions_count']} 个币种")
     else:
-        print(f"    当前持仓: {position['active_positions_count']} 个币种")
-        print(f"    持仓价值: {position['total_position_value']:,.2f} USDT")
+        print(f"    当前持仓（不包括USDT）: {position['active_positions_count']} 个币种")
+        print(f"    持仓价值（不包括USDT）: {position['total_position_value']:,.2f} USDT")
         
-        # 显示主要持仓
+        # 显示主要持仓（不包括USDT）
         if position['positions']:
-            print(f"    主要持仓:")
+            print(f"    主要持仓（不包括USDT）:")
             for pos in position['positions'][:5]:  # 显示前5个持仓
                 print(f"      {pos['asset']}: {pos['total_amount']:,.4f} (价值: {pos['usdt_value']:,.2f} USDT)")
             if len(position['positions']) > 5:
