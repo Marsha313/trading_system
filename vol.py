@@ -421,7 +421,7 @@ class AsterDexMultiAccountSpotAnalytics:
         
         # 计算效率：(盈亏 + 手续费) / 手续费
         if total_commission != 0:
-            efficiency = (realized_pnl + total_commission) / total_commission
+            efficiency = (realized_pnl - total_commission) / total_commission
         else:
             efficiency = 0
 
