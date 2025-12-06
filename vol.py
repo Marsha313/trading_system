@@ -961,8 +961,7 @@ def display_multi_account_report(report: Dict):
             position_value = position['total_position_value']
         
         print(f"{account_name:<14} {volume['total_turnover']:>11,.0f} {commission['total_commission']:>12,.3f} "
-              f"{pnl['realized_pnl']:>12,.3f} {net_profit:>12,.3f} "
-              f"{position_value:>15,.0f} "
+              f"{pnl['realized_pnl']:>12,.3f} {net_profit:>12,.3f} {position_value:>15,.0f}"
               f"{usdt_balance:>12,.0f} {aster_balance:>12,.0f} "
               f"{orders['total_orders']:>10} "
               f"{win_rate:>12.1%} {efficiency:>12.4f}")
