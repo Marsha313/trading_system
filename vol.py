@@ -932,8 +932,7 @@ def display_multi_account_report(report: Dict):
     header_format = "{:<15} {:<12} {:<8} {:<9} {:<8} {:<9} {:<8} {:<12} {:<8} {:<8} {:<8} {:<8} {:<10}"
     print("-" * 150)
     print(header_format.format(
-        '账户名称', '交易额', '手续费', '盈亏', '净收益', '交易次数', 
-        '持仓数', '持仓价值', 'USDT', 'ASTER', '委托数', '胜率', '效率'
+        '账户名称', '交易额', '手续费', '盈亏', '净收益', '持仓价值', 'USDT', 'ASTER', '委托数', '胜率', '效率'
     ))
     print("-" * 150)
 
@@ -962,8 +961,8 @@ def display_multi_account_report(report: Dict):
             position_value = position['total_position_value']
         
         print(f"{account_name:<14} {volume['total_turnover']:>11,.0f} {commission['total_commission']:>12,.3f} "
-              f"{pnl['realized_pnl']:>12,.3f} {net_profit:>12,.3f} {volume['total_trades']:>12} "
-              f"{active_positions:>10} {position_value:>15,.0f} "
+              f"{pnl['realized_pnl']:>12,.3f} {net_profit:>12,.3f} "
+              f"{position_value:>15,.0f} "
               f"{usdt_balance:>12,.0f} {aster_balance:>12,.0f} "
               f"{orders['total_orders']:>10} "
               f"{win_rate:>12.1%} {efficiency:>12.4f}")
