@@ -641,6 +641,7 @@ class SpotSelfTradingBot:
         self.is_running = False
         self.account1_daily_volume = Decimal('0')
         self.account2_daily_volume = Decimal('0')
+        self.symbol_info = {}
         logger.info("现货自交易机器人初始化完成")
 
     def _load_config(self):
@@ -726,8 +727,366 @@ class SpotSelfTradingBot:
         logger.info(f"计算订单数量: 价格={price}, 订单金额={self.config.trading.order_amount}, 数量={quantity}")
         return quantity
 
+    def get_asset_balances(self) -> Tuple[Dict, Dict, bool]:
+        """获取两个账户的资产余额
+        返回: (账户1余额, 账户2余额, 是否需要初始化)
+        """
+        try:
+            logger.info("检查账户资产余额...")
+            
+            # 获取账户余额
+            acc1_balances_raw = self.account1_client.get_account_balance()
+            acc2_balances_raw = self.account2_client.get_account_balance()
+            
+            # 转换为字典格式方便处理
+            acc1_balances = {}
+            acc2_balances = {}
+            
+            for asset in acc1_balances_raw:
+                asset_name = asset['asset']
+                free = Decimal(asset['free'])
+                locked = Decimal(asset['locked'])
+                acc1_balances[asset_name] = {'free': free, 'locked': locked, 'total': free + locked}
+                
+            for asset in acc2_balances_raw:
+                asset_name = asset['asset']
+                free = Decimal(asset['free'])
+                locked = Decimal(asset['locked'])
+                acc2_balances[asset_name] = {'free': free, 'locked': locked, 'total': free + locked}
+            
+            # 分析交易对资产
+            base_asset = self.symbol_info.get('baseAsset', '')
+            quote_asset = self.symbol_info.get('quoteAsset', '')
+            
+            if not base_asset or not quote_asset:
+                logger.error("无法获取交易对资产信息")
+                return acc1_balances, acc2_balances, False
+            
+            logger.info(f"交易对资产: base={base_asset}, quote={quote_asset}")
+            
+            # 检查是否需要初始化（两个账户都没有交易对的base资产）
+            acc1_has_base = acc1_balances.get(base_asset, {}).get('total', Decimal('0')) > self.config.trading.step_size
+            acc2_has_base = acc2_balances.get(base_asset, {}).get('total', Decimal('0')) > self.config.trading.step_size
+            
+            needs_initialization = not (acc1_has_base and acc2_has_base)
+            
+            if needs_initialization:
+                logger.info(f"需要初始化: 账户1有{base_asset}={acc1_has_base}, 账户2有{base_asset}={acc2_has_base}")
+            else:
+                logger.info(f"账户已初始化: 两个账户都有足够的{base_asset}")
+            
+            # 显示资产情况
+            self._display_balance_summary(acc1_balances, acc2_balances, base_asset, quote_asset)
+            
+            return acc1_balances, acc2_balances, needs_initialization
+            
+        except Exception as e:
+            logger.error(f"获取资产余额失败: {e}")
+            return {}, {}, False
+    
+    def _display_balance_summary(self, acc1_balances, acc2_balances, base_asset, quote_asset):
+        """显示资产余额摘要"""
+        logger.info("=== 资产余额摘要 ===")
+        
+        for asset_name in [base_asset, quote_asset]:
+            acc1_balance = acc1_balances.get(asset_name, {'total': Decimal('0')})['total']
+            acc2_balance = acc2_balances.get(asset_name, {'total': Decimal('0')})['total']
+            
+            logger.info(f"{asset_name}: 账户1={acc1_balance}, 账户2={acc2_balance}")
+        
+        # 显示其他主要资产
+        logger.info("其他主要资产:")
+        for asset_name, balance_info in acc1_balances.items():
+            if asset_name not in [base_asset, quote_asset] and balance_info['total'] > Decimal('10'):
+                logger.info(f"  账户1 {asset_name}: {balance_info['total']}")
+        
+        for asset_name, balance_info in acc2_balances.items():
+            if asset_name not in [base_asset, quote_asset] and balance_info['total'] > Decimal('10'):
+                logger.info(f"  账户2 {asset_name}: {balance_info['total']}")
+
+    def initialize_accounts(self) -> bool:
+        """初始化账户资产，确保两个账户都有base资产
+        返回: 是否初始化成功
+        """
+        try:
+            logger.info("开始初始化账户资产...")
+            
+            # 获取当前资产余额
+            acc1_balances, acc2_balances, needs_init = self.get_asset_balances()
+            
+            if not needs_init:
+                logger.info("账户已初始化，无需操作")
+                return True
+            
+            base_asset = self.symbol_info.get('baseAsset', '')
+            quote_asset = self.symbol_info.get('quoteAsset', '')
+            
+            if not base_asset or not quote_asset:
+                logger.error("无法获取交易对资产信息，初始化失败")
+                return False
+            
+            # 检查哪个账户有base资产
+            acc1_has_base = acc1_balances.get(base_asset, {}).get('total', Decimal('0')) > self.config.trading.step_size
+            acc2_has_base = acc2_balances.get(base_asset, {}).get('total', Decimal('0')) > self.config.trading.step_size
+            
+            # 获取订单簿确定市场价格
+            order_book = self.account1_client.get_order_book()
+            bid_price, ask_price = self.analyze_order_book(order_book)
+            
+            if not bid_price or not ask_price:
+                logger.error("无法获取市场价格，初始化失败")
+                return False
+            
+            # 计算中间价
+            market_price = self.calculate_mid_price(bid_price, ask_price)
+            
+            # 计算需要转移的数量
+            needed_base_qty = self.config.trading.order_amount / market_price
+            
+            logger.info(f"初始化参数: 目标数量={needed_base_qty}, 市场价格={market_price}")
+            
+            if not acc1_has_base and not acc2_has_base:
+                logger.error(f"两个账户都没有{base_asset}，无法自动初始化")
+                logger.info(f"请手动向两个账户转入{base_asset}或{quote_asset}")
+                return False
+            
+            # 情况1: 账户1有base资产，账户2没有
+            if acc1_has_base and not acc2_has_base:
+                logger.info(f"账户1有{base_asset}，账户2没有，从账户1向账户2转移")
+                return self._transfer_asset_from_account1_to_account2(base_asset, needed_base_qty)
+            
+            # 情况2: 账户2有base资产，账户1没有
+            elif not acc1_has_base and acc2_has_base:
+                logger.info(f"账户2有{base_asset}，账户1没有，从账户2向账户1转移")
+                return self._transfer_asset_from_account2_to_account1(base_asset, needed_base_qty)
+            
+            # 情况3: 一个账户base资产不足，但有quote资产
+            else:
+                logger.info("一个账户base资产不足，使用quote资产购买")
+                return self._purchase_base_asset_for_deficient_account(acc1_balances, acc2_balances, 
+                                                                      base_asset, quote_asset, market_price)
+                
+        except Exception as e:
+            logger.error(f"初始化账户失败: {e}")
+            return False
+    
+    def _transfer_asset_from_account1_to_account2(self, asset: str, amount: Decimal) -> bool:
+        """从账户1向账户2转移资产（通过自成交）"""
+        try:
+            logger.info(f"通过自成交从账户1向账户2转移{asset}")
+            
+            # 获取订单簿确定价格
+            order_book = self.account1_client.get_order_book()
+            bid_price, ask_price = self.analyze_order_book(order_book)
+            
+            if not bid_price or not ask_price:
+                return False
+            
+            # 计算中间价
+            transfer_price = self.calculate_mid_price(bid_price, ask_price)
+            
+            logger.info(f"转移参数: 资产={asset}, 数量={amount}, 价格={transfer_price}")
+            
+            # 执行自成交转移
+            success, buy_qty, sell_qty, buy_price, sell_price = self.self_trade_executor.execute_self_trade_with_adjustment(
+                transfer_price, amount
+            )
+            
+            if success:
+                logger.info(f"资产转移成功: 账户1卖出{sell_qty}, 账户2买入{buy_qty}")
+                return True
+            else:
+                logger.error("资产转移失败")
+                return False
+                
+        except Exception as e:
+            logger.error(f"资产转移失败: {e}")
+            return False
+    
+    def _transfer_asset_from_account2_to_account1(self, asset: str, amount: Decimal) -> bool:
+        """从账户2向账户1转移资产（通过自成交）"""
+        try:
+            logger.info(f"通过自成交从账户2向账户1转移{asset}")
+            
+            # 获取订单簿确定价格
+            order_book = self.account1_client.get_order_book()
+            bid_price, ask_price = self.analyze_order_book(order_book)
+            
+            if not bid_price or not ask_price:
+                return False
+            
+            # 计算中间价
+            transfer_price = self.calculate_mid_price(bid_price, ask_price)
+            
+            logger.info(f"转移参数: 资产={asset}, 数量={amount}, 价格={transfer_price}")
+            
+            # 执行自成交转移（账户2卖出，账户1买入）
+            success, buy_qty, sell_qty, buy_price, sell_price = self.self_trade_executor.execute_self_trade_with_adjustment(
+                transfer_price, amount
+            )
+            
+            if success:
+                logger.info(f"资产转移成功: 账户2卖出{sell_qty}, 账户1买入{buy_qty}")
+                return True
+            else:
+                logger.error("资产转移失败")
+                return False
+                
+        except Exception as e:
+            logger.error(f"资产转移失败: {e}")
+            return False
+    
+    def _purchase_base_asset_for_deficient_account(self, acc1_balances: Dict, acc2_balances: Dict,
+                                                  base_asset: str, quote_asset: str, market_price: Decimal) -> bool:
+        """为资产不足的账户购买base资产"""
+        try:
+            logger.info(f"为资产不足的账户购买{base_asset}")
+            
+            # 检查哪个账户base资产不足
+            acc1_base = acc1_balances.get(base_asset, {}).get('total', Decimal('0'))
+            acc2_base = acc2_balances.get(base_asset, {}).get('total', Decimal('0'))
+            
+            # 检查哪个账户有quote资产
+            acc1_quote = acc1_balances.get(quote_asset, {}).get('total', Decimal('0'))
+            acc2_quote = acc2_balances.get(quote_asset, {}).get('total', Decimal('0'))
+            
+            needed_amount = self.config.trading.order_amount / market_price
+            
+            # 判断应该为哪个账户购买
+            if acc1_base < needed_amount and acc1_quote > self.config.trading.order_amount:
+                logger.info(f"为账户1购买{base_asset}")
+                return self._execute_purchase_for_account(self.account1_client, base_asset, quote_asset, needed_amount, market_price)
+            elif acc2_base < needed_amount and acc2_quote > self.config.trading.order_amount:
+                logger.info(f"为账户2购买{base_asset}")
+                return self._execute_purchase_for_account(self.account2_client, base_asset, quote_asset, needed_amount, market_price)
+            else:
+                logger.error(f"没有足够的{quote_asset}来购买{base_asset}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"购买base资产失败: {e}")
+            return False
+    
+    def _execute_purchase_for_account(self, client: AsterDexSpotAPIClient, base_asset: str, quote_asset: str, 
+                                     needed_amount: Decimal, market_price: Decimal) -> bool:
+        """为指定账户购买base资产"""
+        try:
+            logger.info(f"为{client.account.name}购买{base_asset}")
+            
+            # 计算需要的quote资产数量
+            needed_quote = needed_amount * market_price
+            
+            # 确保数量符合交易所要求
+            adjusted_amount = client.adjust_to_step_size(needed_amount)
+            
+            # 下市价买单
+            logger.info(f"下市价买单购买{base_asset}: 数量={adjusted_amount}")
+            
+            try:
+                order_result = client.place_market_order('BUY', adjusted_amount)
+                logger.info(f"市价买单成功: {order_result}")
+                
+                # 检查订单状态
+                time.sleep(2)
+                order_status = client.get_order(order_result['orderId'])
+                executed_qty = Decimal(order_status.get('executedQty', '0'))
+                
+                if executed_qty > 0:
+                    logger.info(f"成功购买{executed_qty} {base_asset}")
+                    return True
+                else:
+                    logger.error(f"购买失败，未成交")
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"下单失败: {e}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"执行购买失败: {e}")
+            return False
+
+    def clean_up_balances(self) -> bool:
+        """清理账户余额，将交易对的base资产尽可能转移到quote资产"""
+        try:
+            logger.info("开始清理账户余额...")
+            
+            # 获取当前资产余额
+            acc1_balances, acc2_balances, _ = self.get_asset_balances()
+            
+            base_asset = self.symbol_info.get('baseAsset', '')
+            quote_asset = self.symbol_info.get('quoteAsset', '')
+            
+            if not base_asset or not quote_asset:
+                logger.error("无法获取交易对资产信息")
+                return False
+            
+            all_success = True
+            
+            # 清理账户1
+            acc1_base = acc1_balances.get(base_asset, {}).get('free', Decimal('0'))
+            if acc1_base > self.config.trading.step_size:
+                logger.info(f"清理账户1的{base_asset}: {acc1_base}")
+                success = self._sell_base_asset(self.account1_client, acc1_base)
+                if not success:
+                    all_success = False
+            else:
+                logger.info(f"账户1无需清理: {base_asset}={acc1_base}")
+            
+            # 清理账户2
+            acc2_base = acc2_balances.get(base_asset, {}).get('free', Decimal('0'))
+            if acc2_base > self.config.trading.step_size:
+                logger.info(f"清理账户2的{base_asset}: {acc2_base}")
+                success = self._sell_base_asset(self.account2_client, acc2_base)
+                if not success:
+                    all_success = False
+            else:
+                logger.info(f"账户2无需清理: {base_asset}={acc2_base}")
+            
+            # 检查清理结果
+            time.sleep(3)
+            self.get_asset_balances()
+            
+            return all_success
+            
+        except Exception as e:
+            logger.error(f"清理余额失败: {e}")
+            return False
+    
+    def _sell_base_asset(self, client: AsterDexSpotAPIClient, amount: Decimal) -> bool:
+        """卖出base资产"""
+        try:
+            logger.info(f"{client.account.name}卖出{amount} {self.symbol_info.get('baseAsset', '')}")
+            
+            # 调整数量
+            adjusted_amount = client.adjust_to_step_size(amount)
+            
+            if adjusted_amount < self.config.trading.step_size:
+                logger.info(f"数量{adjusted_amount}小于最小交易单位，跳过")
+                return True
+            
+            # 下市价卖单
+            order_result = client.place_market_order('SELL', adjusted_amount)
+            logger.info(f"市价卖单成功: {order_result}")
+            
+            # 检查订单状态
+            time.sleep(2)
+            order_status = client.get_order(order_result['orderId'])
+            executed_qty = Decimal(order_status.get('executedQty', '0'))
+            
+            if executed_qty > 0:
+                logger.info(f"成功卖出{executed_qty}")
+                return True
+            else:
+                logger.error(f"卖出失败，未成交")
+                return False
+                
+        except Exception as e:
+            logger.error(f"卖出失败: {e}")
+            return False
+
     def execute_self_trade(self, bid_price: Decimal, ask_price: Decimal) -> bool:
-        """执行自交易开仓（现货不需要平仓概念，只需要执行自成交）"""
+        """执行自交易"""
         try:
             logger.info("开始执行现货自交易...")
             # 计算中间价作为交易价格
@@ -749,10 +1108,6 @@ class SpotSelfTradingBot:
                 sell_amount = sell_qty * sell_price
                 cost_difference = buy_amount - sell_amount
                 logger.info(f"现货自交易成功: 买入{buy_qty}@均价{buy_price}, 卖出{sell_qty}@均价{sell_price}, 成本差异={cost_difference}")
-                
-                # 检查资产转移是否正确
-                self.check_balances()
-                
                 return True
             else:
                 logger.error("现货自交易失败")
@@ -761,29 +1116,6 @@ class SpotSelfTradingBot:
         except Exception as e:
             logger.error(f"执行现货自交易失败: {e}")
             return False
-
-    def check_balances(self):
-        """检查账户余额"""
-        try:
-            logger.info("检查账户余额...")
-            acc1_balance = self.account1_client.get_account_balance()
-            acc2_balance = self.account2_client.get_account_balance()
-
-            logger.info("=== 账户余额检查 ===")
-
-            # 显示余额
-            logger.info("账户1余额:")
-            for asset in acc1_balance:
-                if Decimal(asset['free']) > 0 or Decimal(asset['locked']) > 0:
-                    logger.info(f"  {asset['asset']}: 可用={asset['free']}, 冻结={asset['locked']}")
-
-            logger.info("账户2余额:")
-            for asset in acc2_balance:
-                if Decimal(asset['free']) > 0 or Decimal(asset['locked']) > 0:
-                    logger.info(f"  {asset['asset']}: 可用={asset['free']}, 冻结={asset['locked']}")
-
-        except Exception as e:
-            logger.error(f"检查账户余额失败: {e}")
 
     def check_daily_volume_target(self) -> bool:
         """检查是否达到每日目标成交量
@@ -833,18 +1165,53 @@ class SpotSelfTradingBot:
             # 检查交易所信息
             logger.info("检查交易所信息...")
             exchange_info = self.account1_client.get_exchange_info()
+            
+            # 获取交易对信息
             symbol_info = next((s for s in exchange_info.get('symbols', [])
                               if s['symbol'] == self.config.trading.symbol), {})
+            
+            if not symbol_info:
+                logger.error(f"找不到交易对: {self.config.trading.symbol}")
+                return
+            
+            self.symbol_info = symbol_info
             logger.info(f"交易对状态: {symbol_info.get('status', '未知')}")
+            logger.info(f"基础资产: {symbol_info.get('baseAsset')}, 报价资产: {symbol_info.get('quoteAsset')}")
 
-            # 检查账户余额
-            self.check_balances()
+            # 初始化检查：确保两个账户都有base资产
+            logger.info("=== 初始化检查 ===")
+            acc1_balances, acc2_balances, needs_init = self.get_asset_balances()
+            
+            if needs_init:
+                logger.info("检测到需要初始化账户资产")
+                if not self.initialize_accounts():
+                    logger.error("账户初始化失败，程序退出")
+                    return
+                else:
+                    logger.info("账户初始化成功")
+                    # 重新检查资产
+                    time.sleep(2)
+                    acc1_balances, acc2_balances, needs_init = self.get_asset_balances()
+            
+            # 确认两个账户都有足够的base资产
+            base_asset = self.symbol_info.get('baseAsset', '')
+            acc1_base = acc1_balances.get(base_asset, {}).get('total', Decimal('0'))
+            acc2_base = acc2_balances.get(base_asset, {}).get('total', Decimal('0'))
+            
+            if acc1_base < self.config.trading.step_size or acc2_base < self.config.trading.step_size:
+                logger.error(f"账户没有足够的{base_asset}: 账户1={acc1_base}, 账户2={acc2_base}")
+                return
 
             while self.is_running:
                 # 在开始前检查每日目标成交量
                 logger.info("=== 检查每日成交量 ===")
                 if self.check_daily_volume_target():
-                    logger.info("两个账户都已达到每日目标成交量，程序退出")
+                    logger.info("两个账户都已达到每日目标成交量，开始清理余额...")
+                    # 清理余额
+                    if self.clean_up_balances():
+                        logger.info("余额清理完成，程序退出")
+                    else:
+                        logger.warning("余额清理部分失败，请手动检查")
                     break 
                 
                 trade_executed = False
@@ -896,7 +1263,13 @@ class SpotSelfTradingBot:
                 # 最终检查成交量
                 logger.info("=== 最终成交量检查 ===")
                 if self.check_daily_volume_target():
-                    logger.info("已达到每日目标成交量")
+                    logger.info("已达到每日目标成交量，开始清理余额...")
+                    # 清理余额
+                    if self.clean_up_balances():
+                        logger.info("余额清理完成，程序退出")
+                        break
+                    else:
+                        logger.warning("余额清理部分失败")
                 else:
                     logger.info("未达到每日目标成交量，但已完成一次交易")
                 
@@ -908,6 +1281,14 @@ class SpotSelfTradingBot:
 
         except KeyboardInterrupt:
             logger.info("用户中断程序")
+            # 询问是否清理余额
+            try:
+                logger.info("是否清理账户余额？(y/n)")
+                response = input().strip().lower()
+                if response == 'y':
+                    self.clean_up_balances()
+            except:
+                pass
         except Exception as e:
             logger.error(f"程序运行错误: {e}")
         finally:
@@ -925,17 +1306,35 @@ def main():
     parser = argparse.ArgumentParser(description='AsterDex现货自交易机器人')
     parser.add_argument('--config', type=str, required=True, help='账号配置文件路径')
     parser.add_argument('--check-balance', action='store_true', help='只检查余额不开始交易')
+    parser.add_argument('--initialize', action='store_true', help='初始化账户资产')
+    parser.add_argument('--cleanup', action='store_true', help='清理账户余额')
 
     args = parser.parse_args()
 
-    logger.info(f"启动参数: config={args.config}, check-balance={args.check_balance}")
+    logger.info(f"启动参数: config={args.config}, check-balance={args.check_balance}, initialize={args.initialize}, cleanup={args.cleanup}")
 
     try:
         bot = SpotSelfTradingBot(args.config)
 
         if args.check_balance:
             logger.info("执行账户检查模式")
-            bot.check_balances()
+            bot.get_asset_balances()
+        elif args.initialize:
+            logger.info("执行账户初始化模式")
+            # 需要先获取交易所信息
+            exchange_info = bot.account1_client.get_exchange_info()
+            symbol_info = next((s for s in exchange_info.get('symbols', [])
+                              if s['symbol'] == bot.config.trading.symbol), {})
+            bot.symbol_info = symbol_info
+            bot.initialize_accounts()
+        elif args.cleanup:
+            logger.info("执行余额清理模式")
+            # 需要先获取交易所信息
+            exchange_info = bot.account1_client.get_exchange_info()
+            symbol_info = next((s for s in exchange_info.get('symbols', [])
+                              if s['symbol'] == bot.config.trading.symbol), {})
+            bot.symbol_info = symbol_info
+            bot.clean_up_balances()
         else:
             logger.info("执行交易模式")
             bot.run()
