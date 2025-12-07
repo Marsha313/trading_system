@@ -869,7 +869,7 @@ class SpotSelfTradingBot:
             return None
 
     def purchase_base_asset_for_one_account(self, target_client: AsterDexSpotAPIClient) -> bool:
-        """为指定账户购买base资产"""
+        """为指定账户购买base资产，只需购买一次交易的量"""
         try:
             logger.info(f"为{target_client.account.name}购买base资产...")
             
@@ -886,12 +886,11 @@ class SpotSelfTradingBot:
                 logger.error("无法获取稳定市场价格")
                 return False
             
-            # 计算需要购买的数量（购买足够多次交易的数量）
-            single_trade_qty = self.calculate_order_quantity()
-            base_qty_needed = single_trade_qty * Decimal('10')  # 购买足够10次交易
+            # 只需要购买一次交易的量
+            base_qty_needed = self.calculate_order_quantity()
             quote_amount_needed = base_qty_needed * stable_price * Decimal('1.01')  # 增加1%作为缓冲
             
-            logger.info(f"购买参数: 价格={stable_price}, 单次交易={single_trade_qty}, 需要{base_qty_needed} {base_asset}，约{quote_amount_needed} {quote_asset}")
+            logger.info(f"购买参数: 价格={stable_price}, 需要{base_qty_needed} {base_asset}，约{quote_amount_needed} {quote_asset}")
             
             # 检查账户是否有足够的quote资产
             balances_raw = target_client.get_account_balance()
@@ -915,7 +914,7 @@ class SpotSelfTradingBot:
         except Exception as e:
             logger.error(f"为账户购买base资产失败: {e}")
             return False
-    
+        
     def _execute_purchase(self, client: AsterDexSpotAPIClient, quantity: Decimal) -> bool:
         """执行购买base资产"""
         try:
