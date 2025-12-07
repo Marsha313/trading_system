@@ -33,7 +33,7 @@ class AccountConfig:
 @dataclass
 class TradingConfig:
     symbol: str
-    order_amount: Decimal  # 订单金额（代替quantity）
+    base_quantity: Decimal  # 每次交易的代币数量（如BNB数量）
     price_gap_threshold: Decimal  # 价差阈值（tick数）
     price_precision: int
     quantity_precision: int
@@ -85,7 +85,7 @@ class ConfigLoader:
                 trading_config = yaml.safe_load(f)
 
             # 验证必要的配置项
-            required_fields = ['symbol', 'order_amount', 'price_gap_threshold', 'tick_size', 'step_size', 'min_notional']
+            required_fields = ['symbol', 'base_quantity', 'price_gap_threshold', 'tick_size', 'step_size', 'min_notional']
             for field in required_fields:
                 if field not in trading_config:
                     raise ValueError(f"交易配置文件中缺少必要字段: {field}")
@@ -680,7 +680,7 @@ class SpotSelfTradingBot:
         logger.info(f"账号2名称: {account2_data['name']}")
 
         # 将字符串转换为Decimal
-        trading_config_data['order_amount'] = Decimal(trading_config_data['order_amount'])
+        trading_config_data['base_quantity'] = Decimal(trading_config_data['base_quantity'])
         trading_config_data['price_gap_threshold'] = Decimal(trading_config_data['price_gap_threshold'])
         trading_config_data['tick_size'] = Decimal(trading_config_data['tick_size'])
         trading_config_data['step_size'] = Decimal(trading_config_data['step_size'])
@@ -725,13 +725,33 @@ class SpotSelfTradingBot:
 
         return meets_threshold
 
-    def calculate_order_quantity(self, price: Decimal) -> Decimal:
-        """根据订单金额计算数量"""
-        quantity = self.account1_client.calculate_quantity_from_amount(
-            self.config.trading.order_amount, price
-        )
-        logger.info(f"计算订单数量: 价格={price}, 订单金额={self.config.trading.order_amount}, 数量={quantity}")
-        return quantity
+    def calculate_order_quantity(self) -> Decimal:
+        """获取配置的交易数量，并调整为step_size的整数倍"""
+        quantity = self.config.trading.base_quantity
+        adjusted_quantity = self.account1_client.adjust_to_step_size(quantity)
+        
+        # 验证调整后的金额是否满足最小金额要求
+        # 获取当前价格估算金额
+        try:
+            order_book = self.account1_client.get_order_book()
+            bid_price, ask_price = self.analyze_order_book(order_book)
+            if bid_price and ask_price:
+                current_price = self.calculate_mid_price(bid_price, ask_price)
+                adjusted_amount = adjusted_quantity * current_price
+                
+                if adjusted_amount < self.config.trading.min_notional:
+                    logger.warning(f"调整后金额{adjusted_amount}小于最小金额{self.config.trading.min_notional}")
+                    # 增加数量以满足最小金额要求
+                    step_size = self.config.trading.step_size
+                    while adjusted_amount < self.config.trading.min_notional:
+                        adjusted_quantity += step_size
+                        adjusted_amount = adjusted_quantity * current_price
+                    logger.info(f"增加数量至{adjusted_quantity}以满足最小金额要求")
+        except Exception as e:
+            logger.warning(f"无法验证最小金额要求: {e}")
+        
+        logger.info(f"交易数量: 配置={quantity}, 调整后={adjusted_quantity}")
+        return adjusted_quantity
 
     def get_asset_balances(self) -> Tuple[Dict, Dict, Decimal, Decimal]:
         """获取两个账户的资产余额
@@ -867,8 +887,8 @@ class SpotSelfTradingBot:
                 return False
             
             # 计算需要购买的数量（购买足够多次交易的数量）
-            single_trade_qty = self.calculate_order_quantity(stable_price)
-            base_qty_needed = single_trade_qty * Decimal('5')  # 购买足够5次交易
+            single_trade_qty = self.calculate_order_quantity()
+            base_qty_needed = single_trade_qty * Decimal('10')  # 购买足够10次交易
             quote_amount_needed = base_qty_needed * stable_price * Decimal('1.01')  # 增加1%作为缓冲
             
             logger.info(f"购买参数: 价格={stable_price}, 单次交易={single_trade_qty}, 需要{base_qty_needed} {base_asset}，约{quote_amount_needed} {quote_asset}")
@@ -936,10 +956,10 @@ class SpotSelfTradingBot:
         """
         try:
             base_asset = self.symbol_info.get('baseAsset', 'UNKNOWN')
-            single_trade_qty = self.calculate_order_quantity(Decimal('100'))  # 估算单次交易量
+            single_trade_qty = self.calculate_order_quantity()
             
             logger.info(f"确定交易方向: 账户1有{acc1_base_qty} {base_asset}, 账户2有{acc2_base_qty} {base_asset}")
-            logger.info(f"单次交易大约需要: {single_trade_qty} {base_asset}")
+            logger.info(f"单次交易数量: {single_trade_qty} {base_asset}")
             
             # 判断哪个账户可以卖出（有足够的base资产）
             acc1_can_sell = acc1_base_qty >= single_trade_qty
@@ -991,16 +1011,8 @@ class SpotSelfTradingBot:
                 logger.error("无法获取交易对资产信息")
                 return False
             
-            # 计算需要的base资产数量
-            order_book = self.account1_client.get_order_book()
-            bid_price, ask_price = self.analyze_order_book(order_book)
-            
-            if not bid_price or not ask_price:
-                logger.error("无法获取市场价格")
-                return False
-            
-            current_price = self.calculate_mid_price(bid_price, ask_price)
-            single_trade_qty = self.calculate_order_quantity(current_price)
+            # 获取单次交易数量
+            single_trade_qty = self.calculate_order_quantity()
             
             logger.info(f"单次交易需要{single_trade_qty} {base_asset}")
             
@@ -1134,8 +1146,8 @@ class SpotSelfTradingBot:
             trade_price = self.calculate_mid_price(bid_price, ask_price)
             trade_price = self.account1_client.adjust_to_tick_size(trade_price)
             
-            # 计算交易数量
-            quantity = self.calculate_order_quantity(trade_price)
+            # 获取配置的交易数量
+            quantity = self.calculate_order_quantity()
             
             logger.info(f"现货自交易参数: 价格={trade_price}, 数量={quantity}")
 
@@ -1196,7 +1208,7 @@ class SpotSelfTradingBot:
         """运行现货自交易机器人 - 单次执行模式"""
         self.is_running = True
         logger.info("开始现货自交易机器人 - 单次执行模式")
-        logger.info(f"交易配置: 交易对={self.config.trading.symbol}, 订单金额={self.config.trading.order_amount}, "
+        logger.info(f"交易配置: 交易对={self.config.trading.symbol}, 交易数量={self.config.trading.base_quantity}, "
                    f"价差阈值={self.config.trading.price_gap_threshold}tick, "
                    f"tick大小={self.config.trading.tick_size}, step大小={self.config.trading.step_size}, "
                    f"最小金额={self.config.trading.min_notional}, "
@@ -1218,6 +1230,10 @@ class SpotSelfTradingBot:
             self.symbol_info = symbol_info
             logger.info(f"交易对状态: {symbol_info.get('status', '未知')}")
             logger.info(f"基础资产: {symbol_info.get('baseAsset')}, 报价资产: {symbol_info.get('quoteAsset')}")
+
+            # 显示配置的交易数量
+            trade_quantity = self.calculate_order_quantity()
+            logger.info(f"每次交易数量: {trade_quantity} {self.symbol_info.get('baseAsset', '')}")
 
             while self.is_running:
                 # 在开始前检查每日目标成交量
