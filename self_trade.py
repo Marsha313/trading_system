@@ -441,12 +441,14 @@ class SelfTradeExecutor:
         self.account2_client = account2_client
         logger.info("现货自成交执行器初始化完成")
 
-    def place_simultaneous_orders(self, price: Decimal, quantity: Decimal) -> Tuple[bool, Decimal, Decimal, Decimal, Decimal]:
+    def place_simultaneous_orders(self, price: Decimal, quantity: Decimal, 
+                                 seller_client: AsterDexSpotAPIClient, buyer_client: AsterDexSpotAPIClient) -> Tuple[bool, Decimal, Decimal, Decimal, Decimal]:
         """同时放置买卖订单进行自成交
         返回: (是否成功, 买入成交数量, 卖出成交数量, 买入均价, 卖出均价)
         """
         try:
             logger.info(f"准备同时下自成交单: 价格={price}, 数量={quantity}")
+            logger.info(f"卖家: {seller_client.account.name}, 买家: {buyer_client.account.name}")
             
             # 调整价格和数量
             adjusted_price = self.account1_client.adjust_to_tick_size(price)
@@ -460,45 +462,45 @@ class SelfTradeExecutor:
             buy_error = None
             sell_error = None
 
-            def place_buy_order():
-                nonlocal buy_order_result, buy_error
-                try:
-                    logger.info(f"账户1下买单: BUY {adjusted_quantity} @ {adjusted_price}")
-                    buy_order_result = self.account1_client.place_order('BUY', adjusted_price, adjusted_quantity)
-                    logger.info(f"账户1买单成功: {buy_order_result}")
-                except Exception as e:
-                    buy_error = e
-                    logger.error(f"账户1买单失败: {e}")
-
             def place_sell_order():
                 nonlocal sell_order_result, sell_error
                 try:
-                    logger.info(f"账户2下卖单: SELL {adjusted_quantity} @ {adjusted_price}")
-                    sell_order_result = self.account2_client.place_order('SELL', adjusted_price, adjusted_quantity)
-                    logger.info(f"账户2卖单成功: {sell_order_result}")
+                    logger.info(f"{seller_client.account.name}下卖单: SELL {adjusted_quantity} @ {adjusted_price}")
+                    sell_order_result = seller_client.place_order('SELL', adjusted_price, adjusted_quantity)
+                    logger.info(f"{seller_client.account.name}卖单成功: {sell_order_result}")
                 except Exception as e:
                     sell_error = e
-                    logger.error(f"账户2卖单失败: {e}")
+                    logger.error(f"{seller_client.account.name}卖单失败: {e}")
+
+            def place_buy_order():
+                nonlocal buy_order_result, buy_error
+                try:
+                    logger.info(f"{buyer_client.account.name}下买单: BUY {adjusted_quantity} @ {adjusted_price}")
+                    buy_order_result = buyer_client.place_order('BUY', adjusted_price, adjusted_quantity)
+                    logger.info(f"{buyer_client.account.name}买单成功: {buy_order_result}")
+                except Exception as e:
+                    buy_error = e
+                    logger.error(f"{buyer_client.account.name}买单失败: {e}")
 
             # 同时启动两个线程下单
-            buy_thread = threading.Thread(target=place_buy_order)
             sell_thread = threading.Thread(target=place_sell_order)
+            buy_thread = threading.Thread(target=place_buy_order)
             
-            buy_thread.start()
             sell_thread.start()
+            buy_thread.start()
             
             # 等待两个线程完成
-            buy_thread.join()
             sell_thread.join()
+            buy_thread.join()
 
             # 检查下单结果
             if buy_error or sell_error:
-                logger.error(f"下单失败: 买单错误={buy_error}, 卖单错误={sell_error}")
+                logger.error(f"下单失败: 卖单错误={sell_error}, 买单错误={buy_error}")
                 # 取消已成功的订单
                 if buy_order_result:
-                    self.account1_client.cancel_order(buy_order_result['orderId'])
+                    buyer_client.cancel_order(buy_order_result['orderId'])
                 if sell_order_result:
-                    self.account2_client.cancel_order(sell_order_result['orderId'])
+                    seller_client.cancel_order(sell_order_result['orderId'])
                 return False, Decimal('0'), Decimal('0'), Decimal('0'), Decimal('0')
 
             # 等待订单成交
@@ -506,8 +508,8 @@ class SelfTradeExecutor:
             time.sleep(2)
 
             # 检查成交情况
-            buy_order_status = self.account1_client.get_order(buy_order_result['orderId'])
-            sell_order_status = self.account2_client.get_order(sell_order_result['orderId'])
+            buy_order_status = buyer_client.get_order(buy_order_result['orderId'])
+            sell_order_status = seller_client.get_order(sell_order_result['orderId'])
 
             buy_executed = Decimal(buy_order_status.get('executedQty', '0'))
             sell_executed = Decimal(sell_order_status.get('executedQty', '0'))
@@ -523,15 +525,19 @@ class SelfTradeExecutor:
             logger.error(f"自成交下单失败: {e}")
             return False, Decimal('0'), Decimal('0'), Decimal('0'), Decimal('0')
 
-    def execute_self_trade_with_adjustment(self, price: Decimal, quantity: Decimal) -> Tuple[bool, Decimal, Decimal, Decimal, Decimal]:
+    def execute_self_trade_with_adjustment(self, price: Decimal, quantity: Decimal,
+                                         seller_client: AsterDexSpotAPIClient, buyer_client: AsterDexSpotAPIClient) -> Tuple[bool, Decimal, Decimal, Decimal, Decimal]:
         """执行自成交，如果未完全成交则使用市价单完成剩余部分
         返回: (是否完全成交, 买入总数量, 卖出总数量, 买入均价, 卖出均价)
         """
         logger.info(f"开始执行自成交: 目标价格={price}, 目标数量={quantity}")
+        logger.info(f"卖家: {seller_client.account.name}, 买家: {buyer_client.account.name}")
     
         try:
             # 第一步：先在中间价下挂单
-            success, buy_executed, sell_executed, buy_price, sell_price = self.place_simultaneous_orders(price, quantity)
+            success, buy_executed, sell_executed, buy_price, sell_price = self.place_simultaneous_orders(
+                price, quantity, seller_client, buyer_client
+            )
     
             if not success:
                 logger.error("初始下单失败")
@@ -555,28 +561,28 @@ class SelfTradeExecutor:
             if buy_remaining > self.config.step_size or sell_remaining > self.config.step_size:
                 logger.info(f"检测到未成交部分，使用市价单完成: 买单剩余={buy_remaining}, 卖单剩余={sell_remaining}")
     
-                # 确保剩余数量是最小交易单位的整数倍
-                market_buy_qty = self.account1_client.adjust_to_step_size(buy_remaining) if buy_remaining > 0 else Decimal('0')
-                market_sell_qty = self.account2_client.adjust_to_step_size(sell_remaining) if sell_remaining > 0 else Decimal('0')
-    
                 # 取消原来的挂单
                 try:
-                    self.account1_client.cancel_all_orders()
-                    self.account2_client.cancel_all_orders()
+                    seller_client.cancel_all_orders()
+                    buyer_client.cancel_all_orders()
                     logger.info("已取消所有挂单，准备下市价单")
                 except Exception as e:
                     logger.error(f"取消挂单失败: {e}")
     
+                # 确保剩余数量是最小交易单位的整数倍
+                market_buy_qty = buyer_client.adjust_to_step_size(buy_remaining) if buy_remaining > 0 else Decimal('0')
+                market_sell_qty = seller_client.adjust_to_step_size(sell_remaining) if sell_remaining > 0 else Decimal('0')
+    
                 # 下市价单完成剩余部分
                 if market_buy_qty > 0:
                     try:
-                        logger.info(f"账户1下市价买单完成剩余部分: {market_buy_qty}")
-                        buy_market_result = self.account1_client.place_market_order('BUY', market_buy_qty)
+                        logger.info(f"{buyer_client.account.name}下市价买单完成剩余部分: {market_buy_qty}")
+                        buy_market_result = buyer_client.place_market_order('BUY', market_buy_qty)
                         market_orders_placed = True
                         time.sleep(2)
     
                         # 获取市价单成交详情
-                        market_buy_status = self.account1_client.get_order(buy_market_result['orderId'])
+                        market_buy_status = buyer_client.get_order(buy_market_result['orderId'])
                         market_buy_qty_executed = Decimal(market_buy_status.get('executedQty', '0'))
                         market_buy_price = Decimal(market_buy_status.get('avgPrice', '0')) if market_buy_status.get('avgPrice') else Decimal('0')
     
@@ -589,13 +595,13 @@ class SelfTradeExecutor:
     
                 if market_sell_qty > 0:
                     try:
-                        logger.info(f"账户2下市价卖单完成剩余部分: {market_sell_qty}")
-                        sell_market_result = self.account2_client.place_market_order('SELL', market_sell_qty)
+                        logger.info(f"{seller_client.account.name}下市价卖单完成剩余部分: {market_sell_qty}")
+                        sell_market_result = seller_client.place_market_order('SELL', market_sell_qty)
                         market_orders_placed = True
                         time.sleep(2)
     
                         # 获取市价单成交详情
-                        market_sell_status = self.account2_client.get_order(sell_market_result['orderId'])
+                        market_sell_status = seller_client.get_order(sell_market_result['orderId'])
                         market_sell_qty_executed = Decimal(market_sell_status.get('executedQty', '0'))
                         market_sell_price = Decimal(market_sell_status.get('avgPrice', '0')) if market_sell_status.get('avgPrice') else Decimal('0')
     
@@ -614,9 +620,9 @@ class SelfTradeExecutor:
             is_fully_filled = total_buy_qty >= quantity and total_sell_qty >= quantity
     
             if is_fully_filled:
-                logger.info(f"自成交完全成功: 买入{total_buy_qty}@均价{avg_buy_price}, 卖出{total_sell_qty}@均价{avg_sell_price}")
+                logger.info(f"自成交完全成功: {buyer_client.account.name}买入{total_buy_qty}@均价{avg_buy_price}, {seller_client.account.name}卖出{total_sell_qty}@均价{avg_sell_price}")
             else:
-                logger.warning(f"自成交部分成功: 买入{total_buy_qty}/{quantity}, 卖出{total_sell_qty}/{quantity}")
+                logger.warning(f"自成交部分成功: {buyer_client.account.name}买入{total_buy_qty}/{quantity}, {seller_client.account.name}卖出{total_sell_qty}/{quantity}")
     
             return is_fully_filled, total_buy_qty, total_sell_qty, avg_buy_price, avg_sell_price
     
@@ -642,6 +648,9 @@ class SpotSelfTradingBot:
         self.account1_daily_volume = Decimal('0')
         self.account2_daily_volume = Decimal('0')
         self.symbol_info = {}
+        # 跟踪哪个账户有base资产
+        self.has_base_asset_account = None  # 'account1' 或 'account2'
+        self.no_base_asset_account = None   # 对应的另一个账户
         logger.info("现货自交易机器人初始化完成")
 
     def _load_config(self):
@@ -729,7 +738,7 @@ class SpotSelfTradingBot:
 
     def get_asset_balances(self) -> Tuple[Dict, Dict, bool, bool]:
         """获取两个账户的资产余额
-        返回: (账户1余额, 账户2余额, 账户1是否足够, 账户2是否足够)
+        返回: (账户1余额, 账户2余额, 账户1是否有base资产, 账户2是否有base资产)
         """
         try:
             logger.info("检查账户资产余额...")
@@ -764,30 +773,16 @@ class SpotSelfTradingBot:
             
             logger.info(f"交易对资产: base={base_asset}, quote={quote_asset}")
             
-            # 计算需要的base资产数量（使用当前市场价格）
-            try:
-                order_book = self.account1_client.get_order_book()
-                bid_price, ask_price = self.analyze_order_book(order_book)
-                if bid_price and ask_price:
-                    current_price = self.calculate_mid_price(bid_price, ask_price)
-                    needed_base_qty = self.calculate_order_quantity(current_price)
-                else:
-                    needed_base_qty = self.config.trading.order_amount / Decimal('100')  # 默认价格
-            except:
-                needed_base_qty = self.config.trading.order_amount / Decimal('100')  # 默认价格
+            # 检查账户是否有base资产（只要有就可以，不需要足够多）
+            acc1_has_base = acc1_balances.get(base_asset, {}).get('total', Decimal('0')) >= self.config.trading.step_size
+            acc2_has_base = acc2_balances.get(base_asset, {}).get('total', Decimal('0')) >= self.config.trading.step_size
             
-            logger.info(f"需要的{base_asset}数量: {needed_base_qty}")
-            
-            # 检查账户是否有足够的base资产
-            acc1_has_enough = acc1_balances.get(base_asset, {}).get('total', Decimal('0')) >= needed_base_qty
-            acc2_has_enough = acc2_balances.get(base_asset, {}).get('total', Decimal('0')) >= needed_base_qty
-            
-            logger.info(f"账户是否有足够{base_asset}: 账户1={acc1_has_enough}, 账户2={acc2_has_enough}")
+            logger.info(f"账户是否有{base_asset}: 账户1={acc1_has_base}, 账户2={acc2_has_base}")
             
             # 显示资产情况
             self._display_balance_summary(acc1_balances, acc2_balances, base_asset, quote_asset)
             
-            return acc1_balances, acc2_balances, acc1_has_enough, acc2_has_enough
+            return acc1_balances, acc2_balances, acc1_has_base, acc2_has_base
             
         except Exception as e:
             logger.error(f"获取资产余额失败: {e}")
@@ -856,10 +851,10 @@ class SpotSelfTradingBot:
             logger.error(f"等待市场稳定失败: {e}")
             return None
 
-    def purchase_base_asset_for_both_accounts(self) -> bool:
-        """为两个账户购买base资产"""
+    def purchase_base_asset_for_one_account(self, target_client: AsterDexSpotAPIClient) -> bool:
+        """为指定账户购买base资产"""
         try:
-            logger.info("为两个账户购买base资产...")
+            logger.info(f"为{target_client.account.name}购买base资产...")
             
             base_asset = self.symbol_info.get('baseAsset', '')
             quote_asset = self.symbol_info.get('quoteAsset', '')
@@ -874,69 +869,37 @@ class SpotSelfTradingBot:
                 logger.error("无法获取稳定市场价格")
                 return False
             
-            # 计算需要购买的数量
-            needed_base_qty = self.calculate_order_quantity(stable_price)
-            needed_quote_amount = needed_base_qty * stable_price
+            # 计算需要购买的数量（购买2倍的订单量，确保足够）
+            base_qty_needed = self.calculate_order_quantity(stable_price) * Decimal('2')
+            quote_amount_needed = base_qty_needed * stable_price * Decimal('1.01')  # 增加1%作为缓冲
             
-            logger.info(f"购买参数: 价格={stable_price}, 每个账户需要{needed_base_qty} {base_asset}，约{needed_quote_amount} {quote_asset}")
+            logger.info(f"购买参数: 价格={stable_price}, 需要{base_qty_needed} {base_asset}，约{quote_amount_needed} {quote_asset}")
             
             # 检查账户是否有足够的quote资产
-            acc1_balances, acc2_balances, _, _ = self.get_asset_balances()
+            balances_raw = target_client.get_account_balance()
+            balances = {}
+            for asset in balances_raw:
+                asset_name = asset['asset']
+                free = Decimal(asset['free'])
+                locked = Decimal(asset['locked'])
+                balances[asset_name] = {'free': free, 'locked': locked, 'total': free + locked}
             
-            acc1_quote = acc1_balances.get(quote_asset, {}).get('total', Decimal('0'))
-            acc2_quote = acc2_balances.get(quote_asset, {}).get('total', Decimal('0'))
+            quote_balance = balances.get(quote_asset, {}).get('total', Decimal('0'))
+            logger.info(f"{target_client.account.name}有{quote_balance} {quote_asset}")
             
-            logger.info(f"账户{quote_asset}余额: 账户1={acc1_quote}, 账户2={acc2_quote}")
-            
-            if acc1_quote < needed_quote_amount:
-                logger.error(f"账户1没有足够的{quote_asset}，需要{needed_quote_amount}，当前{acc1_quote}")
+            if quote_balance < quote_amount_needed:
+                logger.error(f"{target_client.account.name}没有足够的{quote_asset}，需要{quote_amount_needed}，当前{quote_balance}")
                 return False
             
-            if acc2_quote < needed_quote_amount:
-                logger.error(f"账户2没有足够的{quote_asset}，需要{needed_quote_amount}，当前{acc2_quote}")
-                return False
-            
-            # 为两个账户分别购买base资产
-            success_count = 0
-            
-            # 为账户1购买
-            logger.info(f"为账户1购买{needed_base_qty} {base_asset}...")
-            if self._purchase_base_asset(self.account1_client, needed_base_qty):
-                success_count += 1
-                logger.info("账户1购买成功")
-            else:
-                logger.error("账户1购买失败")
-            
-            # 等待一段时间，避免同时下单影响价格
-            time.sleep(2)
-            
-            # 为账户2购买
-            logger.info(f"为账户2购买{needed_base_qty} {base_asset}...")
-            if self._purchase_base_asset(self.account2_client, needed_base_qty):
-                success_count += 1
-                logger.info("账户2购买成功")
-            else:
-                logger.error("账户2购买失败")
-            
-            # 检查购买结果
-            time.sleep(3)  # 等待订单完全成交
-            
-            if success_count == 2:
-                logger.info("两个账户购买base资产成功")
-                return True
-            elif success_count == 1:
-                logger.warning("只有一个账户购买成功，可能需要手动处理")
-                return False
-            else:
-                logger.error("两个账户购买都失败")
-                return False
+            # 执行购买
+            return self._execute_purchase(target_client, base_qty_needed)
                 
         except Exception as e:
             logger.error(f"为账户购买base资产失败: {e}")
             return False
     
-    def _purchase_base_asset(self, client: AsterDexSpotAPIClient, quantity: Decimal) -> bool:
-        """为指定账户购买base资产"""
+    def _execute_purchase(self, client: AsterDexSpotAPIClient, quantity: Decimal) -> bool:
+        """执行购买base资产"""
         try:
             logger.info(f"{client.account.name}购买{quantity} {self.symbol_info.get('baseAsset', '')}")
             
@@ -968,6 +931,33 @@ class SpotSelfTradingBot:
         except Exception as e:
             logger.error(f"购买base资产失败: {e}")
             return False
+
+    def determine_trading_direction(self, acc1_has_base: bool, acc2_has_base: bool) -> Tuple[Optional[AsterDexSpotAPIClient], Optional[AsterDexSpotAPIClient]]:
+        """确定交易方向：哪个账户卖出，哪个账户买入
+        返回: (卖家客户端, 买家客户端)
+        """
+        if acc1_has_base and not acc2_has_base:
+            # 账户1有base资产，账户2没有：账户1卖出，账户2买入
+            logger.info("交易方向: 账户1卖出，账户2买入")
+            self.has_base_asset_account = 'account1'
+            self.no_base_asset_account = 'account2'
+            return self.account1_client, self.account2_client
+        elif not acc1_has_base and acc2_has_base:
+            # 账户2有base资产，账户1没有：账户2卖出，账户1买入
+            logger.info("交易方向: 账户2卖出，账户1买入")
+            self.has_base_asset_account = 'account2'
+            self.no_base_asset_account = 'account1'
+            return self.account2_client, self.account1_client
+        elif acc1_has_base and acc2_has_base:
+            # 两个账户都有base资产：默认账户1卖出，账户2买入
+            logger.info("两个账户都有base资产，默认: 账户1卖出，账户2买入")
+            self.has_base_asset_account = 'account1'
+            self.no_base_asset_account = 'account2'
+            return self.account1_client, self.account2_client
+        else:
+            # 两个账户都没有base资产：需要先购买
+            logger.warning("两个账户都没有base资产")
+            return None, None
 
     def clean_up_balances(self) -> bool:
         """清理账户余额，将交易对的base资产尽可能转移到quote资产"""
@@ -1048,10 +1038,13 @@ class SpotSelfTradingBot:
             logger.error(f"卖出失败: {e}")
             return False
 
-    def execute_self_trade(self, bid_price: Decimal, ask_price: Decimal) -> bool:
+    def execute_self_trade(self, bid_price: Decimal, ask_price: Decimal, 
+                          seller_client: AsterDexSpotAPIClient, buyer_client: AsterDexSpotAPIClient) -> bool:
         """执行自交易"""
         try:
             logger.info("开始执行现货自交易...")
+            logger.info(f"卖家: {seller_client.account.name}, 买家: {buyer_client.account.name}")
+            
             # 计算中间价作为交易价格
             trade_price = self.calculate_mid_price(bid_price, ask_price)
             trade_price = self.account1_client.adjust_to_tick_size(trade_price)
@@ -1063,14 +1056,14 @@ class SpotSelfTradingBot:
 
             # 执行自成交
             success, buy_qty, sell_qty, buy_price, sell_price = self.self_trade_executor.execute_self_trade_with_adjustment(
-                trade_price, quantity
+                trade_price, quantity, seller_client, buyer_client
             )
 
             if success and buy_qty > 0 and sell_qty > 0:
                 buy_amount = buy_qty * buy_price
                 sell_amount = sell_qty * sell_price
                 cost_difference = buy_amount - sell_amount
-                logger.info(f"现货自交易成功: 买入{buy_qty}@均价{buy_price}, 卖出{sell_qty}@均价{sell_price}, 成本差异={cost_difference}")
+                logger.info(f"现货自交易成功: {buyer_client.account.name}买入{buy_qty}@均价{buy_price}, {seller_client.account.name}卖出{sell_qty}@均价{sell_price}, 成本差异={cost_difference}")
                 return True
             else:
                 logger.error("现货自交易失败")
@@ -1141,51 +1134,40 @@ class SpotSelfTradingBot:
             logger.info(f"交易对状态: {symbol_info.get('status', '未知')}")
             logger.info(f"基础资产: {symbol_info.get('baseAsset')}, 报价资产: {symbol_info.get('quoteAsset')}")
 
-            # 初始化检查：确保两个账户都有足够的base资产
+            # 初始化检查：确定哪个账户有base资产
             logger.info("=== 初始化检查 ===")
-            acc1_balances, acc2_balances, acc1_has_enough, acc2_has_enough = self.get_asset_balances()
+            acc1_balances, acc2_balances, acc1_has_base, acc2_has_base = self.get_asset_balances()
             
-            if not (acc1_has_enough and acc2_has_enough):
-                logger.info("检测到账户base资产不足，准备自动购买...")
+            # 确定交易方向
+            seller_client, buyer_client = self.determine_trading_direction(acc1_has_base, acc2_has_base)
+            
+            if seller_client is None or buyer_client is None:
+                # 两个账户都没有base资产，需要购买
+                logger.info("两个账户都没有base资产，需要购买")
                 
-                base_asset = self.symbol_info.get('baseAsset', '')
-                quote_asset = self.symbol_info.get('quoteAsset', '')
+                # 选择账户1作为目标账户（可以改为更智能的选择）
+                target_client = self.account1_client
+                logger.info(f"选择{target_client.account.name}作为目标账户")
                 
-                # 检查是否有足够的quote资产
-                acc1_quote = acc1_balances.get(quote_asset, {}).get('total', Decimal('0'))
-                acc2_quote = acc2_balances.get(quote_asset, {}).get('total', Decimal('0'))
-                
-                # 获取当前价格以计算需要的quote资产
-                order_book = self.account1_client.get_order_book()
-                bid_price, ask_price = self.analyze_order_book(order_book)
-                
-                if bid_price and ask_price:
-                    current_price = self.calculate_mid_price(bid_price, ask_price)
-                    needed_base_qty = self.calculate_order_quantity(current_price)
-                    needed_quote_amount = needed_base_qty * current_price * Decimal('1.01')  # 增加1%作为缓冲
-                    
-                    logger.info(f"每个账户需要约{needed_quote_amount} {quote_asset}购买{needed_base_qty} {base_asset}")
-                    logger.info(f"账户1有{acc1_quote} {quote_asset}, 账户2有{acc2_quote} {quote_asset}")
-                    
-                    if acc1_quote < needed_quote_amount or acc2_quote < needed_quote_amount:
-                        logger.error(f"账户没有足够的{quote_asset}购买{base_asset}")
-                        logger.info(f"请确保每个账户至少有{needed_quote_amount} {quote_asset}")
-                        return
-                
-                # 自动购买base资产
-                if not self.purchase_base_asset_for_both_accounts():
-                    logger.error("自动购买base资产失败，程序退出")
+                # 购买base资产
+                if not self.purchase_base_asset_for_one_account(target_client):
+                    logger.error("购买base资产失败，程序退出")
                     return
-                else:
-                    logger.info("base资产购买成功")
-                    # 重新检查资产
-                    time.sleep(3)
-                    acc1_balances, acc2_balances, acc1_has_enough, acc2_has_enough = self.get_asset_balances()
+                
+                # 重新检查资产
+                time.sleep(3)
+                acc1_balances, acc2_balances, acc1_has_base, acc2_has_base = self.get_asset_balances()
+                
+                # 重新确定交易方向
+                seller_client, buyer_client = self.determine_trading_direction(acc1_has_base, acc2_has_base)
+                
+                if seller_client is None or buyer_client is None:
+                    logger.error("购买后仍无法确定交易方向，程序退出")
+                    return
             
-            # 确认两个账户都有足够的base资产
-            if not (acc1_has_enough and acc2_has_enough):
-                logger.error("账户base资产仍然不足，程序退出")
-                return
+            logger.info(f"交易方向确定: {seller_client.account.name} -> {buyer_client.account.name}")
+            logger.info(f"{seller_client.account.name}有{self.symbol_info.get('baseAsset')}资产，将卖出")
+            logger.info(f"{buyer_client.account.name}没有或较少{self.symbol_info.get('baseAsset')}资产，将买入")
 
             while self.is_running:
                 # 在开始前检查每日目标成交量
@@ -1222,7 +1204,7 @@ class SpotSelfTradingBot:
                                 logger.info("检测到稳定价差，执行现货自交易...")
 
                                 # 执行现货自交易
-                                if self.execute_self_trade(bid_price, ask_price):
+                                if self.execute_self_trade(bid_price, ask_price, seller_client, buyer_client):
                                     trade_executed = True
                                     logger.info("现货自交易执行成功")
                                 else:
