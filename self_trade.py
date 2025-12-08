@@ -1211,8 +1211,7 @@ class SpotSelfTradingBot:
             logger.info(f"单次交易数量: {single_trade_qty} {base_asset}")
             
             # 确定交易方向
-            seller_client, buyer_client = self.determine_trading_direction_by_balance(acc1_base_qty, acc2_base_qty)(acc1_base_qty, acc2_base_qty)
-            
+            seller_client, buyer_client = self.determine_trading_direction_by_balance(acc1_base_qty, acc2_base_qty)            
             if seller_client is None or buyer_client is None:
                 logger.error("无法确定交易方向")
                 return False
