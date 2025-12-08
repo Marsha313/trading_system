@@ -610,7 +610,10 @@ class AsterDexMultiAccountSpotAnalytics:
             commission_asset = trade.get('commissionAsset', '')
             symbol = trade['symbol']
 
-            total_commission += commission
+            if commission_asset == 'USDT':
+                total_commission += commission
+            else:
+                total_commission += commission * float(trade.get('price', 1))  # 估算为USDT价值
 
             if commission_asset:
                 if commission_asset not in commission_by_asset:
