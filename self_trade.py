@@ -949,57 +949,11 @@ class SpotSelfTradingBot:
             logger.error(f"购买base资产失败: {e}")
             return False
 
-    def determine_trading_direction(self, acc1_base_qty: Decimal, acc2_base_qty: Decimal) -> Tuple[Optional[AsterDexSpotAPIClient], Optional[AsterDexSpotAPIClient]]:
-        """根据账户资产情况动态确定交易方向：哪个账户卖出，哪个账户买入
-        返回: (卖家客户端, 买家客户端)
-        """
-        try:
-            base_asset = self.symbol_info.get('baseAsset', 'UNKNOWN')
-            single_trade_qty = self.calculate_order_quantity()
-            
-            logger.info(f"确定交易方向: 账户1有{acc1_base_qty} {base_asset}, 账户2有{acc2_base_qty} {base_asset}")
-            logger.info(f"单次交易数量: {single_trade_qty} {base_asset}")
-            
-            # 判断哪个账户可以卖出（有足够的base资产）
-            acc1_can_sell = acc1_base_qty >= single_trade_qty
-            acc2_can_sell = acc2_base_qty >= single_trade_qty
-            
-            logger.info(f"能否卖出: 账户1={acc1_can_sell}, 账户2={acc2_can_sell}")
-            
-            # 策略：优先让资产多的账户卖出，资产少的账户买入
-            if acc1_can_sell and acc2_can_sell:
-                # 两个账户都可以卖出，选择资产更多的卖出
-                if acc1_base_qty >= acc2_base_qty:
-                    logger.info(f"两个账户都有资产，账户1资产更多，账户1卖出，账户2买入")
-                    return self.account1_client, self.account2_client
-                else:
-                    logger.info(f"两个账户都有资产，账户2资产更多，账户2卖出，账户1买入")
-                    return self.account2_client, self.account1_client
-            elif acc1_can_sell and not acc2_can_sell:
-                # 只有账户1可以卖出
-                logger.info(f"只有账户1有足够资产，账户1卖出，账户2买入")
-                return self.account1_client, self.account2_client
-            elif not acc1_can_sell and acc2_can_sell:
-                # 只有账户2可以卖出
-                logger.info(f"只有账户2有足够资产，账户2卖出，账户1买入")
-                return self.account2_client, self.account1_client
-            else:
-                # 两个账户都没有足够资产
-                logger.warning(f"两个账户都没有足够的{base_asset}进行交易")
-                logger.info(f"账户1: {acc1_base_qty}, 账户2: {acc2_base_qty}, 需要: {single_trade_qty}")
-                return None, None
-                
-        except Exception as e:
-            logger.error(f"确定交易方向失败: {e}")
-            return None, None
-    def determine_trading_direction_by_balance(self) -> Tuple[Optional[AsterDexSpotAPIClient], Optional[AsterDexSpotAPIClient]]:
+    def determine_trading_direction_by_balance(self, acc1_base_qty: Decimal, acc2_base_qty: Decimal) -> Tuple[Optional[AsterDexSpotAPIClient], Optional[AsterDexSpotAPIClient]]:
         """根据账户余额动态确定交易方向
         返回: (卖家客户端, 买家客户端)
         """
         try:
-            # 获取当前资产
-            _, _, acc1_base_qty, acc2_base_qty = self.get_asset_balances()
-            
             base_asset = self.symbol_info.get('baseAsset', '')
             single_trade_qty = self.calculate_order_quantity()
             
@@ -1039,22 +993,13 @@ class SpotSelfTradingBot:
                 buyer = self.account1_client
                 logger.info(f"只有账户2有足够资产({acc2_base_qty} >= {single_trade_qty})")
             
-            # 检查买家是否有足够的quote资产来购买
-            buyer_quote_balance = self.get_quote_asset_balance(buyer)
-            estimated_cost = single_trade_qty * Decimal('1.05')  # 增加5%的预估成本
-            
-            if buyer_quote_balance < estimated_cost:
-                logger.warning(f"买家{buyer.account.name}可能没有足够的quote资产")
-                logger.info(f"需要约{estimated_cost}，当前有{buyer_quote_balance}")
-                # 但继续交易，让API去验证
-            
             logger.info(f"交易方向确定: {seller.account.name}(卖家) -> {buyer.account.name}(买家)")
             return seller, buyer
             
         except Exception as e:
             logger.error(f"确定交易方向失败: {e}")
             return None, None
-
+        
     def get_quote_asset_balance(self, client: AsterDexSpotAPIClient) -> Decimal:
         """获取指定账户的quote资产余额"""
         try:
@@ -1255,8 +1200,18 @@ class SpotSelfTradingBot:
     def execute_self_trade(self, bid_price: Decimal, ask_price: Decimal) -> bool:
         """执行自交易，根据余额动态确定买卖方向"""
         try:
-            # 每次交易前根据余额确定买卖方向
-            seller_client, buyer_client = self.determine_trading_direction_by_balance()
+            # ========== 只在成交前查询一次余额 ==========
+            # 获取当前资产
+            _, _, acc1_base_qty, acc2_base_qty = self.get_asset_balances()
+            
+            base_asset = self.symbol_info.get('baseAsset', 'UNKNOWN')
+            single_trade_qty = self.calculate_order_quantity()
+            
+            logger.info(f"确定交易方向: 账户1有{acc1_base_qty} {base_asset}, 账户2有{acc2_base_qty} {base_asset}")
+            logger.info(f"单次交易数量: {single_trade_qty} {base_asset}")
+            
+            # 确定交易方向
+            seller_client, buyer_client = self.determine_trading_direction_by_balance(acc1_base_qty, acc2_base_qty)(acc1_base_qty, acc2_base_qty)
             
             if seller_client is None or buyer_client is None:
                 logger.error("无法确定交易方向")
@@ -1265,16 +1220,11 @@ class SpotSelfTradingBot:
             logger.info("开始执行现货自交易...")
             logger.info(f"卖家: {seller_client.account.name}, 买家: {buyer_client.account.name}")
             
-            # 获取卖家的base资产数量
-            _, _, acc1_base_qty, acc2_base_qty = self.get_asset_balances()
-            
+            # 使用卖家的全部代币数量（或至少单次交易数量）
             if seller_client == self.account1_client:
                 seller_qty = acc1_base_qty
             else:
                 seller_qty = acc2_base_qty
-            
-            # 使用卖家的全部代币数量（或至少单次交易数量）
-            single_trade_qty = self.calculate_order_quantity()
             
             # 确定实际交易数量：如果卖家资产多于单次交易量，使用单次交易量；否则使用全部资产
             if seller_qty >= single_trade_qty:
@@ -1310,18 +1260,12 @@ class SpotSelfTradingBot:
                 logger.info(f"  {seller_client.account.name}卖出{sell_qty} @ 均价{sell_price}")
                 logger.info(f"  成本差异: {cost_difference}")
                 
-                # 交易后显示新的余额分布
-                time.sleep(2)  # 等待资产更新
+                # ========== 交易后再查询一次余额用于显示 ==========
                 _, _, new_acc1_qty, new_acc2_qty = self.get_asset_balances()
                 
                 logger.info(f"交易后余额:")
                 logger.info(f"  账户1: {new_acc1_qty} {self.symbol_info.get('baseAsset', '')}")
                 logger.info(f"  账户2: {new_acc2_qty} {self.symbol_info.get('baseAsset', '')}")
-                
-                # 分析下一次可能的交易方向
-                next_seller, next_buyer = self.determine_trading_direction_by_balance()
-                if next_seller and next_buyer:
-                    logger.info(f"下一次可能交易方向: {next_seller.account.name}卖出 -> {next_buyer.account.name}买入")
                 
                 return True
             else:
@@ -1331,7 +1275,7 @@ class SpotSelfTradingBot:
         except Exception as e:
             logger.error(f"执行现货自交易失败: {e}")
             return False
-    
+        
     def check_daily_volume_target(self) -> bool:
         """检查是否达到每日目标成交量
         返回: True=已达到目标，False=未达到目标
@@ -1371,19 +1315,19 @@ class SpotSelfTradingBot:
         self.is_running = True
         logger.info("开始现货自交易机器人 - 单次执行模式")
         logger.info(f"交易配置: 交易对={self.config.trading.symbol}, 交易数量={self.config.trading.base_quantity}, "
-                   f"价差阈值={self.config.trading.price_gap_threshold}tick, "
-                   f"tick大小={self.config.trading.tick_size}, step大小={self.config.trading.step_size}, "
-                   f"最小金额={self.config.trading.min_notional}, "
-                   f"每日目标成交量={self.config.trading.daily_volume_target}")
+                f"价差阈值={self.config.trading.price_gap_threshold}tick, "
+                f"tick大小={self.config.trading.tick_size}, step大小={self.config.trading.step_size}, "
+                f"最小金额={self.config.trading.min_notional}, "
+                f"每日目标成交量={self.config.trading.daily_volume_target}")
 
         try:
-            # 检查交易所信息
+            # 检查交易所信息（只需一次）
             logger.info("检查交易所信息...")
             exchange_info = self.account1_client.get_exchange_info()
             
             # 获取交易对信息
             symbol_info = next((s for s in exchange_info.get('symbols', [])
-                              if s['symbol'] == self.config.trading.symbol), {})
+                            if s['symbol'] == self.config.trading.symbol), {})
             
             if not symbol_info:
                 logger.error(f"找不到交易对: {self.config.trading.symbol}")
@@ -1397,22 +1341,19 @@ class SpotSelfTradingBot:
             trade_quantity = self.calculate_order_quantity()
             logger.info(f"每次交易数量: {trade_quantity} {self.symbol_info.get('baseAsset', '')}")
 
+            # ========== 初始化时只检查一次余额 ==========
+            logger.info("=== 执行账户资产初始化 ===")
+            if not self.check_and_adjust_assets():
+                logger.error("资产初始化失败")
+                return
+            logger.info("✅ 初始化完成，开始交易循环")
+            
+            # 初始成交量检查
+            if self.check_daily_volume_target():
+                logger.info("初始化时已达到每日目标成交量，程序退出")
+                return
+
             while self.is_running:
-                # 在开始前检查每日目标成交量
-                logger.info("=== 检查每日成交量 ===")
-                if self.check_daily_volume_target():
-                    logger.info("已达到每日目标成交量，程序退出")
-                    break 
-                
-                # 只在开始时执行一次初始化检查
-                if not hasattr(self, 'initialized'):
-                    logger.info("=== 执行账户资产初始化 ===")
-                    if not self.check_and_adjust_assets():
-                        logger.error("资产初始化失败")
-                        break
-                    self.initialized = True
-                    logger.info("✅ 初始化完成，开始交易循环")
-                
                 trade_executed = False
 
                 # 等待稳定价差并执行自交易
@@ -1442,6 +1383,18 @@ class SpotSelfTradingBot:
                                 if self.execute_self_trade(bid_price, ask_price):
                                     trade_executed = True
                                     logger.info("现货自交易执行成功")
+                                    
+                                    # ========== 只在成交后检查成交量 ==========
+                                    logger.info("=== 检查成交后每日成交量 ===")
+                                    if self.check_daily_volume_target():
+                                        logger.info("已达到每日目标成交量，开始清理余额...")
+                                        # 清理余额
+                                        if self.clean_up_balances():
+                                            logger.info("余额清理完成，程序退出")
+                                            self.is_running = False
+                                            break
+                                        else:
+                                            logger.warning("余额清理部分失败")
                                 else:
                                     logger.error("现货自交易执行失败，继续监控...")
                             else:
@@ -1464,21 +1417,9 @@ class SpotSelfTradingBot:
                     logger.warning(f"等待{max_wait_time}秒未找到交易机会，重新开始")
                     continue
 
+                # 等待一段时间再进行下一次交易
                 time.sleep(self.config.trading.wait_time)
-                
-                # 最终检查成交量
-                logger.info("=== 最终成交量检查 ===")
-                if self.check_daily_volume_target():
-                    logger.info("已达到每日目标成交量，开始清理余额...")
-                    # 清理余额
-                    if self.clean_up_balances():
-                        logger.info("余额清理完成，程序退出")
-                        break
-                    else:
-                        logger.warning("余额清理部分失败")
-                else:
-                    logger.info("未达到每日目标成交量，准备下一次交易")
-                
+                    
             # 程序完成
             logger.info("✅ 程序执行完成")
 
@@ -1503,7 +1444,6 @@ class SpotSelfTradingBot:
             except:
                 pass
             logger.info("现货自交易机器人已停止")
-
 
 def main():
     parser = argparse.ArgumentParser(description='AsterDex现货自交易机器人')
