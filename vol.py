@@ -612,8 +612,18 @@ class AsterDexMultiAccountSpotAnalytics:
 
             if commission_asset == 'USDT':
                 total_commission += commission
-            else:
+            elif commission_asset == symbol.replace('USDT', ''):
                 total_commission += commission * float(trade.get('price', 1))  # 估算为USDT价值
+            else:  
+                # 将非USDT手续费按当前价格折算为USDT
+                try:
+                    ticker_price = self.get_ticker_price(symbol=commission_asset + 'USDT')
+                    price = float(ticker_price.get('price', 0))
+                    commission_in_usdt = commission * price
+                    total_commission += commission_in_usdt
+                except:
+                    # 如果获取价格失败，直接使用原始手续费值
+                    total_commission += commission
 
             if commission_asset:
                 if commission_asset not in commission_by_asset:
