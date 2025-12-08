@@ -105,7 +105,7 @@ class TradingPairConfig:
     max_spread: float = 0.002
     max_price_change: float = 0.005
     min_depth_multiplier: float = 2
-    strategy: TradingStrategy = TradingStrategy.BOTH
+    strategy: TradingStrategy = TradingStrategy.LIMIT_BOTH
     min_price_increment: float = 0.0001
     min_5min_volume: float = 0.0
     

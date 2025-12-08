@@ -672,7 +672,7 @@ class AsterDexMultiAccountSpotAnalytics:
                             matched_quantity = buy_record['quantity']
                             cost = buy_record['price'] * matched_quantity
                             revenue = sell_price * matched_quantity
-                            pnl = revenue - cost - buy_record['commission'] - sell_commission
+                            pnl = revenue - cost
                             symbol_pnl += pnl
                             
                             sell_quantity -= matched_quantity
@@ -682,7 +682,7 @@ class AsterDexMultiAccountSpotAnalytics:
                             matched_quantity = sell_quantity
                             cost = buy_record['price'] * matched_quantity
                             revenue = sell_price * matched_quantity
-                            pnl = revenue - cost - (buy_record['commission'] * (matched_quantity / buy_record['quantity'])) - sell_commission
+                            pnl = revenue - cost
                             symbol_pnl += pnl
                             
                             # 更新买入记录
