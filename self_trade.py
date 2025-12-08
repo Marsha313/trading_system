@@ -963,8 +963,8 @@ class SpotSelfTradingBot:
             logger.info(f"  单次交易数量: {single_trade_qty} {base_asset}")
             
             # 检查哪个账户可以作为卖家（有足够的base资产）
-            acc1_can_sell = acc1_base_qty >= single_trade_qty
-            acc2_can_sell = acc2_base_qty >= single_trade_qty
+            acc1_can_sell = acc1_base_qty >= single_trade_qty/2
+            acc2_can_sell = acc2_base_qty >= single_trade_qty/2
             
             if not acc1_can_sell and not acc2_can_sell:
                 logger.warning("两个账户都没有足够的base资产进行交易")
