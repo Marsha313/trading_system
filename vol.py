@@ -26,6 +26,7 @@ class AsterDexMultiAccountSpotAnalytics:
         self.settings = self._load_settings()
         self.base_url = "https://sapi.asterdex.com"  # 改为现货API
         self.symbols_filter = self.settings.get('symbols_filter', [])  # 新增：交易对过滤器
+        self.price_cache = {}
 
     def _load_accounts_config(self) -> List[AccountConfig]:
         """从YAML配置文件加载多个账户配置"""
@@ -243,8 +244,16 @@ class AsterDexMultiAccountSpotAnalytics:
 
         return self._signed_request(account, 'GET', '/api/v1/openOrders', params)
 
+
     def get_ticker_price(self, symbol: str = None) -> Dict:
-        """获取最新价格"""
+        """获取最新价格，使用缓存"""
+        if symbol in self.price_cache:
+            # 检查缓存是否有效（例如，缓存时间不超过60秒）
+            cache_entry = self.price_cache[symbol]
+            cache_time = cache_entry.get('timestamp', 0)
+            if time.time() - cache_time < 60:  # 缓存60秒
+                return cache_entry['data']
+        
         params = {}
         if symbol:
             params['symbol'] = symbol
@@ -253,15 +262,50 @@ class AsterDexMultiAccountSpotAnalytics:
         url = f"{self.base_url}/api/v1/ticker/price"
         response = session.get(url, params=params, timeout=10)
         response.raise_for_status()
-        return response.json()
+        
+        result = response.json()
+        
+        # 更新缓存
+        if symbol:
+            self.price_cache[symbol] = {
+                'data': result,
+                'timestamp': time.time()
+            }
+        
+        return result
 
     def get_all_ticker_prices(self) -> Dict:
-        """获取所有交易对的最新价格"""
+        """获取所有交易对的最新价格，使用缓存"""
+        # 检查是否有完整的价格缓存
+        if 'ALL_PRICES' in self.price_cache:
+            cache_entry = self.price_cache['ALL_PRICES']
+            cache_time = cache_entry.get('timestamp', 0)
+            if time.time() - cache_time < 30:  # 缓存30秒，因为数据量较大
+                return cache_entry['data']
+        
         session = requests.Session()
         url = f"{self.base_url}/api/v1/ticker/price"
         response = session.get(url, timeout=10)
         response.raise_for_status()
-        return response.json()
+        
+        result = response.json()
+        
+        # 更新完整价格缓存
+        self.price_cache['ALL_PRICES'] = {
+            'data': result,
+            'timestamp': time.time()
+        }
+        
+        # 同时将各个交易对价格也单独缓存
+        if isinstance(result, list):
+            for ticker in result:
+                if 'symbol' in ticker:
+                    self.price_cache[ticker['symbol']] = {
+                        'data': ticker,
+                        'timestamp': time.time()
+                    }
+        
+        return result
 
     def test_account_connectivity(self, account: AccountConfig) -> bool:
         """测试账户连接性"""
@@ -616,14 +660,44 @@ class AsterDexMultiAccountSpotAnalytics:
                 total_commission += commission * float(trade.get('price', 1))  # 估算为USDT价值
             else:  
                 # 将非USDT手续费按当前价格折算为USDT
-                try:
-                    ticker_price = self.get_ticker_price(symbol=commission_asset + 'USDT')
-                    price = float(ticker_price.get('price', 0))
-                    commission_in_usdt = commission * price
-                    total_commission += commission_in_usdt
-                except:
-                    # 如果获取价格失败，直接使用原始手续费值
-                    total_commission += commission
+                # 先尝试从缓存获取价格
+                price_symbol = commission_asset + 'USDT'
+                price = 0.0
+                
+                # 检查缓存
+                if price_symbol in self.price_cache:
+                    cache_entry = self.price_cache[price_symbol]
+                    cache_time = cache_entry.get('timestamp', 0)
+                    if time.time() - cache_time < 60:  # 缓存60秒内有效
+                        ticker_data = cache_entry['data']
+                        if isinstance(ticker_data, dict) and 'price' in ticker_data:
+                            price = float(ticker_data['price'])
+                        elif isinstance(ticker_data, list):
+                            # 如果是批量获取的数据
+                            for ticker in ticker_data:
+                                if ticker.get('symbol') == price_symbol and 'price' in ticker:
+                                    price = float(ticker['price'])
+                                    break
+                
+                # 缓存中没有或已过期，获取新价格
+                if price == 0.0:
+                    try:
+                        ticker_price = self.get_ticker_price(symbol=price_symbol)
+                        if isinstance(ticker_price, dict) and 'price' in ticker_price:
+                            price = float(ticker_price['price'])
+                        elif isinstance(ticker_price, list):
+                            # 批量返回的情况
+                            for ticker in ticker_price:
+                                if ticker.get('symbol') == price_symbol and 'price' in ticker:
+                                    price = float(ticker['price'])
+                                    break
+                        else:
+                            price = 0.0
+                    except:
+                        price = 0.0
+                
+                commission_in_usdt = commission * price
+                total_commission += commission_in_usdt
 
             if commission_asset:
                 if commission_asset not in commission_by_asset:
@@ -639,7 +713,6 @@ class AsterDexMultiAccountSpotAnalytics:
             'commission_by_asset': commission_by_asset,
             'commission_by_symbol': commission_by_symbol
         }
-
     def _analyze_pnl_spot(self, trades: List[Dict]) -> Dict:
         """分析盈亏 - 现货版本"""
         # 现货交易的盈亏计算比较复杂，需要跟踪成本基础
