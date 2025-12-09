@@ -5,7 +5,7 @@ import hashlib
 import requests
 import logging
 import yaml
-from typing import Dict, List, Optional, Tuple, Deque
+from typing import Dict, List, Optional, Tuple, Deque, Set
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 import argparse
@@ -48,7 +48,70 @@ class TradingConfig:
     base_url: str = "https://sapi.asterdex.com"  # 改为现货API地址
     log_level: str = "INFO"
     log_file: str = "spot_auto_trading.log"
-    daily_volume_target: Decimal = field(default_factory=lambda: Decimal('0'))  # 每日目标成交量
+    total_volume_target: Decimal = field(default_factory=lambda: Decimal('0'))  # 总目标成交量
+
+
+class VolumeCache:
+    """交易量缓存管理器"""
+    def __init__(self):
+        self.cache: Dict[str, Dict[str, Decimal]] = {}  # account_name -> {trade_id: quote_qty}
+        self.processed_trade_ids: Dict[str, Set[str]] = {}  # account_name -> set of trade_ids
+        logger.info("交易量缓存初始化")
+    
+    def reset_account(self, account_name: str):
+        """重置账户缓存"""
+        if account_name in self.cache:
+            self.cache[account_name] = {}
+        if account_name in self.processed_trade_ids:
+            self.processed_trade_ids[account_name] = set()
+        logger.info(f"已重置账户 {account_name} 的交易量缓存")
+    
+    def get_cached_volume(self, account_name: str) -> Decimal:
+        """获取缓存的交易量"""
+        if account_name in self.cache:
+            total = sum(self.cache[account_name].values())
+            logger.debug(f"获取缓存交易量: {account_name} = {total}")
+            return total
+        return Decimal('0')
+    
+    def add_trades(self, account_name: str, trades: List[Dict]) -> Decimal:
+        """添加新的成交记录到缓存并返回新增交易量"""
+        if account_name not in self.cache:
+            self.cache[account_name] = {}
+        if account_name not in self.processed_trade_ids:
+            self.processed_trade_ids[account_name] = set()
+        
+        new_volume = Decimal('0')
+        new_trade_count = 0
+        
+        for trade in trades:
+            trade_id = str(trade.get('id', ''))
+            if not trade_id or trade_id in self.processed_trade_ids[account_name]:
+                continue
+                
+            quote_qty = Decimal(trade.get('quoteQty', '0'))
+            if quote_qty <= 0:
+                # 备用计算逻辑
+                qty = Decimal(trade.get('qty', '0'))
+                price = Decimal(trade.get('price', '0'))
+                if price > 0 and qty > 0:
+                    quote_qty = qty * price
+            
+            if quote_qty > 0:
+                self.cache[account_name][trade_id] = quote_qty
+                self.processed_trade_ids[account_name].add(trade_id)
+                new_volume += quote_qty
+                new_trade_count += 1
+        
+        if new_trade_count > 0:
+            total_volume = self.get_cached_volume(account_name)
+            logger.info(f"添加新成交记录: {account_name} 新增{new_trade_count}笔交易，新增交易量={new_volume}，累计={total_volume}")
+        
+        return new_volume
+    
+    def get_total_volume(self, account_name: str) -> Decimal:
+        """获取总交易量"""
+        return self.get_cached_volume(account_name)
 
 
 class ConfigLoader:
@@ -90,10 +153,10 @@ class ConfigLoader:
                 if field not in trading_config:
                     raise ValueError(f"交易配置文件中缺少必要字段: {field}")
 
-            # 添加每日目标成交量参数（可选）
-            if 'daily_volume_target' not in trading_config:
-                trading_config['daily_volume_target'] = '0'
-                logger.info("未设置每日目标成交量，使用默认值0（无限制）")
+            # 添加总目标成交量参数（可选）
+            if 'total_volume_target' not in trading_config:
+                trading_config['total_volume_target'] = '0'
+                logger.info("未设置总目标成交量，使用默认值0（无限制）")
 
             logger.info("交易配置文件加载成功")
             return trading_config
@@ -200,10 +263,12 @@ class PriceStabilityMonitor:
 
 
 class AsterDexSpotAPIClient:
-    def __init__(self, config: TradingConfig, account: AccountConfig):
+    def __init__(self, config: TradingConfig, account: AccountConfig, volume_cache: VolumeCache):
         self.config = config
         self.account = account
+        self.volume_cache = volume_cache
         self.session = requests.Session()
+        self.last_trade_fetch_time: Dict[str, int] = {}  # 每个账户最后获取交易的时间
         logger.info(f"初始化现货API客户端: {account.name}")
 
     def _sign_request(self, params: Dict) -> str:
@@ -388,49 +453,45 @@ class AsterDexSpotAPIClient:
             params['endTime'] = end_time
         return self._request('GET', '/api/v1/userTrades', signed=True, **params)
 
-    def get_daily_volume(self) -> Decimal:
-        """获取当日成交额（基于UTC时间）"""
+    def get_total_volume(self) -> Decimal:
+        """获取总成交额（基于缓存增量查询）"""
         try:
-            logger.info("获取当日成交额（UTC时间统计）...")
-    
-            # 使用UTC时间
-            utc_now = datetime.utcnow()
-            utc_today_midnight = datetime(utc_now.year, utc_now.month, utc_now.day, 0, 0, 0, 0)
-    
-            # 将UTC时间转换为时间戳（毫秒）
-            utc_start_timestamp = int(utc_today_midnight.timestamp() * 1000)
-            current_timestamp = int(time.time() * 1000)
-    
-            logger.info(f"UTC统计时间范围: {utc_today_midnight} 至 {utc_now}")
-    
-            # 查询今日（UTC）的成交历史
-            trades = self.get_user_trades(start_time=utc_start_timestamp, end_time=current_timestamp)
-    
-            total_amount = Decimal('0')
-    
-            if isinstance(trades, list):
-                for trade in trades:
-                    quote_qty = Decimal(trade.get('quoteQty', '0'))
-    
-                    if quote_qty > 0:
-                        total_amount += quote_qty
-                    else:
-                        # 备用计算逻辑
-                        qty = Decimal(trade.get('qty', '0'))
-                        price = Decimal(trade.get('price', '0'))
-                        if price > 0 and qty > 0:
-                            total_amount += qty * price
-    
-                logger.info(f"账户 {self.account.name} 今日（UTC）成交额: {total_amount}")
+            logger.info(f"获取账户 {self.account.name} 的总成交额...")
+            
+            # 从缓存获取当前总量
+            cached_volume = self.volume_cache.get_cached_volume(self.account.name)
+            
+            # 获取上次查询后的新交易记录
+            last_fetch_time = self.last_trade_fetch_time.get(self.account.name, 0)
+            current_time_ms = int(time.time() * 1000)
+            
+            logger.debug(f"查询新交易记录: 最后查询时间={last_fetch_time}, 当前时间={current_time_ms}")
+            
+            # 获取上次查询后的新交易
+            new_trades = self.get_user_trades(start_time=last_fetch_time + 1, end_time=current_time_ms)
+            
+            if isinstance(new_trades, list):
+                # 添加到缓存
+                new_volume = self.volume_cache.add_trades(self.account.name, new_trades)
+                
+                if new_volume > 0:
+                    logger.info(f"发现新交易: {self.account.name} 新增{len(new_trades)}笔，新增交易量={new_volume}")
+                
+                # 更新最后查询时间
+                self.last_trade_fetch_time[self.account.name] = current_time_ms
             else:
-                logger.warning(f"获取成交记录返回格式异常: {trades}")
-                total_amount = Decimal('0')
-    
-            return total_amount
+                logger.warning(f"获取成交记录返回格式异常: {new_trades}")
+            
+            # 获取更新后的总量
+            total_volume = self.volume_cache.get_total_volume(self.account.name)
+            logger.info(f"账户 {self.account.name} 总成交额: {total_volume}")
+            
+            return total_volume
     
         except Exception as e:
-            logger.error(f"获取当日成交额失败: {e}")
-            return Decimal('0')
+            logger.error(f"获取总成交额失败: {e}")
+            # 返回缓存中的总量
+            return self.volume_cache.get_cached_volume(self.account.name)
 
 
 class SelfTradeExecutor:
@@ -635,9 +696,13 @@ class SpotSelfTradingBot:
     def __init__(self, accounts_config_path: str):
         self.accounts_config_path = accounts_config_path
         logger.info(f"初始化现货自交易机器人，配置文件: {accounts_config_path}")
+        
+        # 初始化缓存管理器
+        self.volume_cache = VolumeCache()
+        
         self.config = self._load_config()
-        self.account1_client = AsterDexSpotAPIClient(self.config.trading, self.config.account1)
-        self.account2_client = AsterDexSpotAPIClient(self.config.trading, self.config.account2)
+        self.account1_client = AsterDexSpotAPIClient(self.config.trading, self.config.account1, self.volume_cache)
+        self.account2_client = AsterDexSpotAPIClient(self.config.trading, self.config.account2, self.volume_cache)
         self.self_trade_executor = SelfTradeExecutor(self.config.trading, self.account1_client, self.account2_client)
         self.stability_monitor = PriceStabilityMonitor(
             self.config.trading.stability_period,
@@ -645,8 +710,8 @@ class SpotSelfTradingBot:
             self.config.trading.sampling_rate
         )
         self.is_running = False
-        self.account1_daily_volume = Decimal('0')
-        self.account2_daily_volume = Decimal('0')
+        self.account1_total_volume = Decimal('0')
+        self.account2_total_volume = Decimal('0')
         self.symbol_info = {}
         logger.info("现货自交易机器人初始化完成")
 
@@ -685,7 +750,7 @@ class SpotSelfTradingBot:
         trading_config_data['tick_size'] = Decimal(trading_config_data['tick_size'])
         trading_config_data['step_size'] = Decimal(trading_config_data['step_size'])
         trading_config_data['min_notional'] = Decimal(trading_config_data['min_notional'])
-        trading_config_data['daily_volume_target'] = Decimal(trading_config_data['daily_volume_target'])
+        trading_config_data['total_volume_target'] = Decimal(trading_config_data['total_volume_target'])
 
         logger.info("配置文件解析完成")
         return Config(
@@ -1275,37 +1340,37 @@ class SpotSelfTradingBot:
             logger.error(f"执行现货自交易失败: {e}")
             return False
         
-    def check_daily_volume_target(self) -> bool:
-        """检查是否达到每日目标成交量
+    def check_total_volume_target(self) -> bool:
+        """检查是否达到总目标成交量
         返回: True=已达到目标，False=未达到目标
         """
         try:
-            # 获取当日成交量
-            self.account1_daily_volume = self.account1_client.get_daily_volume()
-            self.account2_daily_volume = self.account2_client.get_daily_volume()
+            # 获取总成交量（从缓存中读取）
+            self.account1_total_volume = self.account1_client.get_total_volume()
+            self.account2_total_volume = self.account2_client.get_total_volume()
             
-            daily_target = self.config.trading.daily_volume_target
+            total_target = self.config.trading.total_volume_target
             
-            logger.info(f"成交量检查: 账户1={self.account1_daily_volume}, 账户2={self.account2_daily_volume}, 目标={daily_target}")
+            logger.info(f"成交量检查: 账户1={self.account1_total_volume}, 账户2={self.account2_total_volume}, 目标={total_target}")
             
             # 如果目标为0，表示无限制
-            if daily_target == Decimal('0'):
-                logger.info("每日目标成交量为0（无限制）")
+            if total_target == Decimal('0'):
+                logger.info("总目标成交量为0（无限制）")
                 return False
             
             # 检查两个账户是否都达到目标
-            if self.account1_daily_volume >= daily_target and self.account2_daily_volume >= daily_target:
-                logger.info(f"✅ 两个账户都已达到每日目标成交量: 账户1={self.account1_daily_volume}, 账户2={self.account2_daily_volume}, 目标={daily_target}")
+            if self.account1_total_volume >= total_target and self.account2_total_volume >= total_target:
+                logger.info(f"✅ 两个账户都已达到总目标成交量: 账户1={self.account1_total_volume}, 账户2={self.account2_total_volume}, 目标={total_target}")
                 return True
             else:
                 # 显示剩余量
-                remaining1 = max(Decimal('0'), daily_target - self.account1_daily_volume)
-                remaining2 = max(Decimal('0'), daily_target - self.account2_daily_volume)
+                remaining1 = max(Decimal('0'), total_target - self.account1_total_volume)
+                remaining2 = max(Decimal('0'), total_target - self.account2_total_volume)
                 logger.info(f"📊 成交量进度: 账户1还需{remaining1}, 账户2还需{remaining2}")
                 return False
                 
         except Exception as e:
-            logger.error(f"检查每日成交量失败: {e}")
+            logger.error(f"检查总成交量失败: {e}")
             # 如果检查失败，继续执行程序
             return False
 
@@ -1317,7 +1382,7 @@ class SpotSelfTradingBot:
                 f"价差阈值={self.config.trading.price_gap_threshold}tick, "
                 f"tick大小={self.config.trading.tick_size}, step大小={self.config.trading.step_size}, "
                 f"最小金额={self.config.trading.min_notional}, "
-                f"每日目标成交量={self.config.trading.daily_volume_target}")
+                f"总目标成交量={self.config.trading.total_volume_target}")
 
         try:
             # 检查交易所信息（只需一次）
@@ -1340,6 +1405,11 @@ class SpotSelfTradingBot:
             trade_quantity = self.calculate_order_quantity()
             logger.info(f"每次交易数量: {trade_quantity} {self.symbol_info.get('baseAsset', '')}")
 
+            # ========== 初始化时重置缓存，重新开始统计 ==========
+            logger.info("重置交易量缓存，开始新的统计周期")
+            self.volume_cache.reset_account(self.config.account1.name)
+            self.volume_cache.reset_account(self.config.account2.name)
+            
             # ========== 初始化时只检查一次余额 ==========
             logger.info("=== 执行账户资产初始化 ===")
             if not self.check_and_adjust_assets():
@@ -1348,8 +1418,8 @@ class SpotSelfTradingBot:
             logger.info("✅ 初始化完成，开始交易循环")
             
             # 初始成交量检查
-            if self.check_daily_volume_target():
-                logger.info("初始化时已达到每日目标成交量，程序退出")
+            if self.check_total_volume_target():
+                logger.info("初始化时已达到总目标成交量，程序退出")
                 return
 
             while self.is_running:
@@ -1384,9 +1454,9 @@ class SpotSelfTradingBot:
                                     logger.info("现货自交易执行成功")
                                     
                                     # ========== 只在成交后检查成交量 ==========
-                                    logger.info("=== 检查成交后每日成交量 ===")
-                                    if self.check_daily_volume_target():
-                                        logger.info("已达到每日目标成交量，开始清理余额...")
+                                    logger.info("=== 检查成交后总成交量 ===")
+                                    if self.check_total_volume_target():
+                                        logger.info("已达到总目标成交量，开始清理余额...")
                                         # 清理余额
                                         if self.clean_up_balances():
                                             logger.info("余额清理完成，程序退出")
