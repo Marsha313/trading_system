@@ -490,45 +490,115 @@ class AsterDexSpotAPIClient:
         return self._request('GET', '/api/v1/userTrades', signed=True, **params)
 
     def get_total_volume(self) -> Decimal:
-        """获取总成交额（基于缓存增量查询）"""
+        """获取总成交额（简化版，直接查询并累加）"""
         try:
             logger.info(f"获取账户 {self.account.name} 的总成交额...")
             
-            # 从缓存获取当前总量
-            cached_volume = self.volume_cache.get_cached_volume(self.account.name)
-            
-            # 获取上次查询后的新交易记录
-            last_fetch_time = self.last_trade_fetch_time.get(self.account.name, 0)
+            # 获取当前时间戳（毫秒）
             current_time_ms = int(time.time() * 1000)
             
-            logger.debug(f"查询新交易记录: 最后查询时间={last_fetch_time}, 当前时间={current_time_ms}")
+            # 设置一个合理的查询范围（比如最近48小时）
+            # 可以根据需要调整，但要确保不超过API限制（7天）
+            hours_to_check = 48
+            start_time_ms = current_time_ms - (hours_to_check * 3600 * 1000)
             
-            # 获取上次查询后的新交易
-            new_trades = self.get_user_trades(start_time=last_fetch_time + 1, end_time=current_time_ms)
+            # 确保查询范围不超过7天
+            max_range = 7 * 24 * 3600 * 1000
+            if (current_time_ms - start_time_ms) > max_range:
+                start_time_ms = current_time_ms - max_range
+                hours_to_check = 7 * 24
             
-            if isinstance(new_trades, list):
-                # 添加到缓存
-                new_volume = self.volume_cache.add_trades(self.account.name, new_trades)
+            logger.debug(f"查询时间范围: {start_time_ms} 至 {current_time_ms} (最近{hours_to_check//24}天)")
+            
+            # 查询交易记录
+            trades = self.get_user_trades(start_time=start_time_ms, end_time=current_time_ms)
+            
+            total_volume = Decimal('0')
+            
+            if isinstance(trades, list):
+                for trade in trades:
+                    # 使用 quoteQty 字段（现货交易的成交额）
+                    quote_qty_str = trade.get('quoteQty')
+                    if quote_qty_str:
+                        try:
+                            quote_qty = Decimal(quote_qty_str)
+                            if quote_qty > 0:
+                                total_volume += quote_qty
+                                continue
+                        except:
+                            pass
+                    
+                    # 备用计算：qty * price
+                    qty_str = trade.get('qty')
+                    price_str = trade.get('price')
+                    if qty_str and price_str:
+                        try:
+                            qty = Decimal(qty_str)
+                            price = Decimal(price_str)
+                            if price > 0 and qty > 0:
+                                total_volume += qty * price
+                        except:
+                            pass
                 
-                if new_volume > 0:
-                    logger.info(f"发现新交易: {self.account.name} 新增{len(new_trades)}笔，新增交易量={new_volume}")
-                
-                # 更新最后查询时间
-                self.last_trade_fetch_time[self.account.name] = current_time_ms
+                logger.info(f"账户 {self.account.name} 最近{hours_to_check//24}天成交额: {total_volume}")
+                return total_volume
             else:
-                logger.warning(f"获取成交记录返回格式异常: {new_trades}")
-            
-            # 获取更新后的总量
-            total_volume = self.volume_cache.get_total_volume(self.account.name)
-            logger.info(f"账户 {self.account.name} 总成交额: {total_volume}")
-            
-            return total_volume
+                logger.warning(f"获取成交记录返回格式异常: {trades}")
+                return Decimal('0')
     
         except Exception as e:
             logger.error(f"获取总成交额失败: {e}")
-            # 返回缓存中的总量
-            return self.volume_cache.get_cached_volume(self.account.name)
-
+            return Decimal('0')
+        
+    def get_total_volume_since_start(self) -> Decimal:
+        """获取从程序开始运行以来的总成交额"""
+        try:
+            logger.info(f"获取账户 {self.account.name} 程序运行以来的总成交额...")
+            
+            # 如果程序启动时间未记录，则初始化
+            if not hasattr(self, 'program_start_time'):
+                self.program_start_time = int(time.time() * 1000)
+                logger.info(f"记录程序启动时间: {self.program_start_time}")
+            
+            # 查询从程序启动到现在的交易记录
+            trades = self.get_user_trades(start_time=self.program_start_time, end_time=int(time.time() * 1000))
+            
+            total_volume = Decimal('0')
+            
+            if isinstance(trades, list):
+                for trade in trades:
+                    # 使用 quoteQty 字段
+                    quote_qty_str = trade.get('quoteQty')
+                    if quote_qty_str:
+                        try:
+                            quote_qty = Decimal(quote_qty_str)
+                            if quote_qty > 0:
+                                total_volume += quote_qty
+                                continue
+                        except:
+                            pass
+                    
+                    # 备用计算
+                    qty_str = trade.get('qty')
+                    price_str = trade.get('price')
+                    if qty_str and price_str:
+                        try:
+                            qty = Decimal(qty_str)
+                            price = Decimal(price_str)
+                            if price > 0 and qty > 0:
+                                total_volume += qty * price
+                        except:
+                            pass
+                
+                logger.info(f"账户 {self.account.name} 程序运行以来成交额: {total_volume}")
+                return total_volume
+            else:
+                logger.warning(f"获取成交记录返回格式异常: {trades}")
+                return Decimal('0')
+    
+        except Exception as e:
+            logger.error(f"获取程序运行以来成交额失败: {e}")
+            return Decimal('0')
 
 class SelfTradeExecutor:
     """现货自成交执行器"""
@@ -1377,17 +1447,15 @@ class SpotSelfTradingBot:
             return False
         
     def check_total_volume_target(self) -> bool:
-        """检查是否达到总目标成交量
-        返回: True=已达到目标，False=未达到目标
-        """
+        """检查是否达到总目标成交量（从程序开始运行累计）"""
         try:
-            # 获取总成交量（从缓存中读取）
-            self.account1_total_volume = self.account1_client.get_total_volume()
-            self.account2_total_volume = self.account2_client.get_total_volume()
+            # 获取程序运行以来的总成交量
+            self.account1_total_volume = self.account1_client.get_total_volume_since_start()
+            self.account2_total_volume = self.account2_client.get_total_volume_since_start()
             
             total_target = self.config.trading.total_volume_target
             
-            logger.info(f"成交量检查: 账户1={self.account1_total_volume}, 账户2={self.account2_total_volume}, 目标={total_target}")
+            logger.info(f"成交量检查: 账户1累计={self.account1_total_volume}, 账户2累计={self.account2_total_volume}, 目标={total_target}")
             
             # 如果目标为0，表示无限制
             if total_target == Decimal('0'):
@@ -1409,7 +1477,7 @@ class SpotSelfTradingBot:
             logger.error(f"检查总成交量失败: {e}")
             # 如果检查失败，继续执行程序
             return False
-
+        
     def run(self):
         """运行现货自交易机器人 - 单次执行模式"""
         self.is_running = True
