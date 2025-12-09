@@ -1613,6 +1613,17 @@ class SpotSelfTradingBot:
                                             logger.warning("余额清理部分失败")
                                 else:
                                     logger.error("现货自交易执行失败，继续监控...")
+                                    # ========== 只在成交后检查成交量 ==========
+                                    logger.info("=== 检查成交后总成交量 ===")
+                                    if self.check_total_volume_target():
+                                        logger.info("已达到总目标成交量，开始清理余额...")
+                                        # 清理余额
+                                        if self.clean_up_balances():
+                                            logger.info("余额清理完成，程序退出")
+                                            self.is_running = False
+                                            break
+                                        else:
+                                            logger.warning("余额清理部分失败")
                             else:
                                 if not is_stable:
                                     logger.info("价格不稳定，继续监控交易时机...")
