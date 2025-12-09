@@ -109,9 +109,45 @@ class VolumeCache:
         
         return new_volume
     
-    def get_total_volume(self, account_name: str) -> Decimal:
-        """获取总交易量"""
-        return self.get_cached_volume(account_name)
+    def get_total_volume(self) -> Decimal:
+        """获取总成交额（只查询最近7天的交易记录）"""
+        try:
+            logger.info(f"获取账户 {self.account.name} 的总成交额（最近7天）...")
+            
+            # 当前时间
+            current_time_ms = int(time.time() * 1000)
+            
+            # 计算7天前的时间戳
+            seven_days_ago_ms = current_time_ms - (7 * 24 * 3600 * 1000)
+            
+            logger.debug(f"查询时间范围: {seven_days_ago_ms} 至 {current_time_ms}")
+            
+            # 查询最近7天的交易记录
+            recent_trades = self.get_user_trades(start_time=seven_days_ago_ms, end_time=current_time_ms)
+            
+            if isinstance(recent_trades, list):
+                # 清空缓存（因为每次都重新统计最近7天）
+                self.volume_cache.reset_account(self.account.name)
+                
+                # 添加到缓存
+                new_volume = self.volume_cache.add_trades(self.account.name, recent_trades)
+                
+                total_volume = self.volume_cache.get_total_volume(self.account.name)
+                
+                logger.info(f"最近7天交易记录: {len(recent_trades)}笔，总成交额={total_volume}")
+                
+                # 更新最后查询时间
+                self.last_trade_fetch_time[self.account.name] = current_time_ms
+                
+                return total_volume
+            else:
+                logger.warning(f"获取成交记录返回格式异常: {recent_trades}")
+                return Decimal('0')
+    
+        except Exception as e:
+            logger.error(f"获取总成交额失败: {e}")
+            # 返回缓存中的总量
+            return self.volume_cache.get_cached_volume(self.account.name)
 
 
 class ConfigLoader:
@@ -1405,10 +1441,11 @@ class SpotSelfTradingBot:
             trade_quantity = self.calculate_order_quantity()
             logger.info(f"每次交易数量: {trade_quantity} {self.symbol_info.get('baseAsset', '')}")
 
-            # ========== 初始化时重置缓存，重新开始统计 ==========
-            logger.info("重置交易量缓存，开始新的统计周期")
-            self.volume_cache.reset_account(self.config.account1.name)
-            self.volume_cache.reset_account(self.config.account2.name)
+            # 初始成交量检查（会自动统计最近7天数据）
+            logger.info("=== 检查初始成交量 ===")
+            self.account1_total_volume = self.account1_client.get_total_volume()
+            self.account2_total_volume = self.account2_client.get_total_volume()
+            logger.info(f"初始成交量: 账户1={self.account1_total_volume}, 账户2={self.account2_total_volume}")
             
             # ========== 初始化时只检查一次余额 ==========
             logger.info("=== 执行账户资产初始化 ===")
@@ -1417,9 +1454,9 @@ class SpotSelfTradingBot:
                 return
             logger.info("✅ 初始化完成，开始交易循环")
             
-            # 初始成交量检查
+            # 初始成交量目标检查
             if self.check_total_volume_target():
-                logger.info("初始化时已达到总目标成交量，程序退出")
+                logger.info("初始时已达到总目标成交量，程序退出")
                 return
 
             while self.is_running:
