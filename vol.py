@@ -899,7 +899,7 @@ class AsterDexMultiAccountSpotAnalytics:
 
         # 计算平均效率
         if all_accounts_data:
-            total_stats['avg_efficiency'] = total_stats['total_efficiency'] / len(all_accounts_data)
+            total_stats['avg_efficiency'] = total_stats['total_net_profit'] / total_stats['total_commission']
 
         report = {
             'report_period': self._get_report_period_description(start_time, end_time),
