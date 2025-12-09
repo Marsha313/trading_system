@@ -606,7 +606,32 @@ class SelfTradeExecutor:
         self.config = config
         self.account1_client = account1_client
         self.account2_client = account2_client
+        # 添加成交量累加器
+        self.account1_volume = Decimal('0')
+        self.account2_volume = Decimal('0')
         logger.info("现货自成交执行器初始化完成")
+    
+    def _accumulate_volume(self, client: AsterDexSpotAPIClient, volume: Decimal):
+        """累加成交量"""
+        if client == self.account1_client:
+            self.account1_volume += volume
+            logger.debug(f"累加账户1成交量: {volume}, 累计={self.account1_volume}")
+        else:
+            self.account2_volume += volume
+            logger.debug(f"累加账户2成交量: {volume}, 累计={self.account2_volume}")
+
+    def get_account_volume(self, client: AsterDexSpotAPIClient) -> Decimal:
+        """获取账户累计成交量"""
+        if client == self.account1_client:
+            return self.account1_volume
+        else:
+            return self.account2_volume
+
+    def reset_volume(self):
+        """重置成交量统计"""
+        self.account1_volume = Decimal('0')
+        self.account2_volume = Decimal('0')
+        logger.info("成交量统计已重置")
 
     def place_simultaneous_orders(self, price: Decimal, quantity: Decimal, 
                                  seller_client: AsterDexSpotAPIClient, buyer_client: AsterDexSpotAPIClient) -> Tuple[bool, Decimal, Decimal, Decimal, Decimal]:
@@ -722,6 +747,17 @@ class SelfTradeExecutor:
             total_sell_qty = sell_executed
             total_buy_cost = buy_executed * buy_price if buy_executed > 0 else Decimal('0')
             total_sell_cost = sell_executed * sell_price if sell_executed > 0 else Decimal('0')
+            
+            # 累加成交量（初始挂单部分）
+            if buy_executed > 0:
+                buy_volume = buy_executed * buy_price
+                self._accumulate_volume(buyer_client, buy_volume)
+                logger.info(f"累加初始买单成交量: {buyer_client.account.name} + {buy_volume}")
+            
+            if sell_executed > 0:
+                sell_volume = sell_executed * sell_price
+                self._accumulate_volume(seller_client, sell_volume)
+                logger.info(f"累加初始卖单成交量: {seller_client.account.name} + {sell_volume}")
     
             # 如果还有剩余未成交，使用市价单完成
             market_orders_placed = False
@@ -755,6 +791,11 @@ class SelfTradeExecutor:
     
                         total_buy_qty += market_buy_qty_executed
                         total_buy_cost += market_buy_qty_executed * market_buy_price
+                        
+                        # 累加市价单成交量
+                        market_buy_volume = market_buy_qty_executed * market_buy_price
+                        self._accumulate_volume(buyer_client, market_buy_volume)
+                        logger.info(f"累加市价买单成交量: {buyer_client.account.name} + {market_buy_volume}")
     
                         logger.info(f"市价买单成交: {market_buy_qty_executed} @ 均价{market_buy_price}")
                     except Exception as e:
@@ -774,6 +815,11 @@ class SelfTradeExecutor:
     
                         total_sell_qty += market_sell_qty_executed
                         total_sell_cost += market_sell_qty_executed * market_sell_price
+                        
+                        # 累加市价单成交量
+                        market_sell_volume = market_sell_qty_executed * market_sell_price
+                        self._accumulate_volume(seller_client, market_sell_volume)
+                        logger.info(f"累加市价卖单成交量: {seller_client.account.name} + {market_sell_volume}")
     
                         logger.info(f"市价卖单成交: {market_sell_qty_executed} @ 均价{market_sell_price}")
                     except Exception as e:
@@ -796,7 +842,6 @@ class SelfTradeExecutor:
         except Exception as e:
             logger.error(f"执行自成交失败: {e}")
             return False, Decimal('0'), Decimal('0'), Decimal('0'), Decimal('0')
-
 
 class SpotSelfTradingBot:
     def __init__(self, accounts_config_path: str):
@@ -1447,11 +1492,11 @@ class SpotSelfTradingBot:
             return False
         
     def check_total_volume_target(self) -> bool:
-        """检查是否达到总目标成交量（从程序开始运行累计）"""
+        """检查是否达到总目标成交量（从内存中读取累计值）"""
         try:
-            # 获取程序运行以来的总成交量
-            self.account1_total_volume = self.account1_client.get_total_volume_since_start()
-            self.account2_total_volume = self.account2_client.get_total_volume_since_start()
+            # 直接从内存中获取累计成交量
+            self.account1_total_volume = self.self_trade_executor.get_account_volume(self.account1_client)
+            self.account2_total_volume = self.self_trade_executor.get_account_volume(self.account2_client)
             
             total_target = self.config.trading.total_volume_target
             
@@ -1476,8 +1521,7 @@ class SpotSelfTradingBot:
         except Exception as e:
             logger.error(f"检查总成交量失败: {e}")
             # 如果检查失败，继续执行程序
-            return False
-        
+            return False   
     def run(self):
         """运行现货自交易机器人 - 单次执行模式"""
         self.is_running = True
@@ -1509,11 +1553,9 @@ class SpotSelfTradingBot:
             trade_quantity = self.calculate_order_quantity()
             logger.info(f"每次交易数量: {trade_quantity} {self.symbol_info.get('baseAsset', '')}")
 
-            # 初始成交量检查（会自动统计最近7天数据）
-            logger.info("=== 检查初始成交量 ===")
-            self.account1_total_volume = self.account1_client.get_total_volume()
-            self.account2_total_volume = self.account2_client.get_total_volume()
-            logger.info(f"初始成交量: 账户1={self.account1_total_volume}, 账户2={self.account2_total_volume}")
+            # 重置成交量统计
+            self.self_trade_executor.reset_volume()
+            logger.info("成交量统计已重置，开始新的统计周期")
             
             # ========== 初始化时只检查一次余额 ==========
             logger.info("=== 执行账户资产初始化 ===")
@@ -1522,7 +1564,7 @@ class SpotSelfTradingBot:
                 return
             logger.info("✅ 初始化完成，开始交易循环")
             
-            # 初始成交量目标检查
+            # 初始成交量检查（应为0）
             if self.check_total_volume_target():
                 logger.info("初始时已达到总目标成交量，程序退出")
                 return
